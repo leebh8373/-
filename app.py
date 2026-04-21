@@ -62,6 +62,7 @@ with tab_predict:
     with c1:
         st.subheader("📦 1차: 오스테나이트화")
         p1_type = st.selectbox("공정 종류", ["Quenching", "Normalizing", "Annealing"], key="p1_type_select")
+        p1_temp = st.number_input("오스테나이트화 온도 (℃)", min_value=700, max_value=1200, value=1050, step=10, key="p1_temp_input")
         p1_time = st.number_input("가열 유지 시간 (min)", 10, 5000, 360, key="p1_time_input")
         p1_cool = st.selectbox("냉각 방식", ["수냉(WQ)", "유냉(OQ)", "공냉(AC)"], key="p1_cool_select")
     
@@ -81,7 +82,7 @@ with tab_predict:
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         # 1차 물성 엔진 호출
-        ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
+        ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
         
         # 최종 물성 시뮬레이션 호출
         final_report = calc.get_final_expert_simulation(
