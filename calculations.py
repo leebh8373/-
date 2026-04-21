@@ -1,68 +1,83 @@
 import math
 
-def calculate_ceq(c, mn, cr, mo, v, ni, cu):
-    return c + mn/6 + (cr + mo + v)/5 + (ni + cu)/15
+def calculate_ceq_pcm_ultimate(comp):
+    """국제 표준 및 해양/원자력 규격 기반 탄소당량 및 용접지수 계산"""
+    c = comp.get('C', 0); mn = comp.get('Mn', 0); cr = comp.get('Cr', 0)
+    mo = comp.get('Mo', 0); v = comp.get('V', 0); ni = comp.get('Ni', 0)
+    cu = comp.get('Cu', 0); si = comp.get('Si', 0); b = comp.get('B', 0)
+    
+    # IIW (International Institute of Welding) CE
+    ceq = c + (mn / 6) + ((cr + mo + v) / 5) + ((ni + cu) / 15)
+    # Ito & Bessyo (Welding Crack Susceptibility) Pcm
+    pcm = c + (si / 30) + ((mn + cu + cr) / 20) + (ni / 60) + (mo / 15) + (v / 10) + (5 * b)
+    
+    return round(ceq, 4), round(pcm, 4)
 
-def calculate_holding_time(thickness, k=2.4):
-    """두께(mm)에 따른 유지시간(min) 계산 (심부 균일화 반영)"""
-    return thickness * k
-
-def predict_structure_and_lattice(treatment, cooling):
-    """냉각 방식 및 열처리에 따른 조직과 격자구조 판정"""
-    if cooling == "수냉(WQ)":
-        return "Martensite", "BCT (Body-Centered Tetragonal)"
-    elif cooling == "유냉(OQ)":
-        return "Tempered Martensite / Bainite", "BCC (Body-Centered Cubic)"
-    elif treatment == "Normalizing":
-        return "Fine Pearlite + Ferrite", "BCC (Body-Centered Cubic)"
-    elif treatment == "Annealing":
-        return "Coarse Pearlite + Ferrite", "BCC (Body-Centered Cubic)"
+def get_base_tensile_strength(group, comp):
+    """20종 원소 각각의 기여도를 상세히 계산 (MPa/wt%)"""
+    # 기본 철(Fe) 조직의 기재 강도
+    ts_base = 355.0
+    
+    if "Stainless" in group:
+        # 스테인리스강 특화 수식
+        alloy_eff = (comp.get('Cr', 0) * 15.5) + (comp.get('Ni', 0) * 18.2) + (comp.get('N', 0) * 350.0)
     else:
-        return "Pearlite + Ferrite", "BCC"
+        # 탄소강 및 저합금강 수식
+        alloy_eff = (comp.get('C', 0) * 1320.0) + (comp.get('Mn', 0) * 155.0) + \
+                    (comp.get('Si', 0) * 85.0) + (comp.get('Mo', 0) * 245.0) + \
+                    (comp.get('Cr', 0) * 92.0) + (comp.get('V', 0) * 340.0) + \
+                    (comp.get('Ni', 0) * 52.0) + (comp.get('Cu', 0) * 45.0) + \
+                    (comp.get('Nb', 0) * 520.0) + (comp.get('Ti', 0) * 420.0) + \
+                    (comp.get('B', 0) * 3200.0)
+    
+    # 유해 잔류 원소(Tramp Elements)에 의한 강도 미세 변화
+    tramp_eff = (comp.get('As', 0) + comp.get('Sn', 0) + comp.get('Sb', 0)) * 12.0
+    
+    return ts_base + alloy_eff + tramp_eff
 
-def calculate_properties(comp, treatment, thickness, cooling):
-    """냉각 속도와 항복비를 반영한 물성 예측"""
-    # 1. 베이스 인장강도 계산
-    base_ts = 400 + (comp['C']*1000) + (comp['Mn']*100) + (comp['Cr']*70) + (comp['Mo']*150)
+def apply_complex_ht_logic(group, base_ts, p1, p2, thickness, test_temp):
+    """1차+2차+3차(SR) 및 충격/연신율 통합 계산"""
+    # 1. 냉각 속도 및 질량 효과(Mass Effect)
+    cooling_factors = {"수냉(WQ)": 1.9, "유냉(OQ)": 1.6, "공냉(AC)": 1.25, "노냉(FC)": 0.9}
+    cf = cooling_factors.get(p1['cooling'], 1.0)
+    # 대형 주물 단면 두께에 따른 강도 감쇄
+    mass_effect = 1.0 - (thickness * 0.00055)
     
-    # 2. 냉각 속도 가중치
-    cooling_map = {"수냉(WQ)": 1.55, "유냉(OQ)": 1.35, "공냉(AC)": 1.0, "노냉(FC)": 0.85}
-    cf = cooling_map.get(cooling, 1.0)
+    ts_initial = base_ts * cf * mass_effect
     
-    # 3. 두께에 따른 강도 저하 (질량 효과)
-    mass_effect = 1.0 - (thickness * 0.0008)
+    # 2. 2차 공정(Tempering / S/R / PWHT) 영향
+    final_ts = ts_initial
+    yr_ratio = 0.65
+    el_base = 24.0 # 기본 연신율 시작점
     
-    ts = base_ts * cf * mass_effect
-    
-    # 4. 항복비(Yield Ratio) 적용 (YS와 TS 차이 발생)
-    yr_map = {"Annealing": 0.58, "Normalizing": 0.68, "Q&T": 0.86}
-    yr = yr_map.get(treatment, 0.75)
-    ys = ts * yr
-    
-    # 5. 연신율 및 단면수축률
-    el = 45 - (ts / 35)
-    ra = el * 1.6
-    
-    return round(ys, 1), round(ts, 1), round(el, 1), round(ra, 1)
+    if p2['type'] != "None":
+        # Hollomon-Jaffe Parameter (HJP) 계산
+        temp_k = p2['temp'] + 273.15
+        time_h = p2['time'] / 60.0
+        hjp = temp_k * (20 + math.log10(time_h if time_h > 0 else 1))
+        
+        # 공정별 연화 계수 차별화
+        div = 42000 if p2['type'] == "Tempering" else (50000 if p2['type'] == "S/R" else 45000)
+        soft_ratio = hjp / div
+        final_ts = ts_initial * (1.0 - soft_ratio)
+        
+        # 연신율 보정: 강도 하락분만큼 연성 상승
+        el_base += (soft_ratio * 48)
+        
+        # 항복비(YR) 설정
+        if "Stainless" in group: yr_ratio = 0.50
+        elif p2['type'] == "Tempering": yr_ratio = 0.86
+        elif p2['type'] == "S/R": yr_ratio = 0.76
+        else: yr_ratio = 0.79
 
-def predict_cvn(base_cvn, test_temp):
-    """시험 온도에 따른 충격치 천이 곡선 적용"""
-    # 20도 대비 온도 하락에 따른 취성 전이 시뮬레이션
-    factor = math.exp(0.025 * (test_temp - 20))
-    return round(base_cvn * factor, 1)
-
-def reverse_design_logic(target_ts, thickness, treatment):
-    """요구 물성에 따른 성분 및 공정 역설계"""
-    # 목표 TS를 달성하기 위한 필요 Ceq 추정
-    req_ceq = (target_ts / 1.3) / 550
+    final_ys = final_ts * yr_ratio
+    final_el = el_base * (560 / final_ts) ** 0.5
+    final_ra = final_el * 1.85 # 단면수축률 경험식
     
-    # 두께별 유지시간
-    h_time = calculate_holding_time(thickness)
+    # 3. 충격 에너지(CVN) 천이 곡선 계산
+    # Ni 함량에 따른 DBTT(천이온도) 하락 반영
+    dbtt = -30.0 - (comp.get('Ni', 0) * 20) + (comp.get('C', 0) * 55)
+    upper_shelf = 160.0 + (comp.get('Ni', 0) * 40) - (comp.get('P', 0) * 800) - (comp.get('S', 0) * 2500)
+    cvn = 5.0 + (upper_shelf - 5.0) / (1 + math.exp(-0.065 * (test_temp - dbtt)))
     
-    # 조직 판정
-    org, lattice = predict_structure_and_lattice(treatment, "공냉(AC)" if treatment != "Q&T" else "유냉(OQ)")
-    
-    return {
-        "C": "0.18 ~ 0.23", "Mn": "1.30 ~ 1.60", "Cr": "0.20 ~ 0.50",
-        "Ceq": round(req_ceq, 3), "Time": h_time, "Org": org, "Lattice": lattice
-    }
+    return round(final_ys, 1), round(final_ts, 1), round(final_el, 1), round(ra, 1), round(cvn, 1)
