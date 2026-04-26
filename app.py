@@ -86,9 +86,9 @@ with tab_predict:
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
-        # 최종 물성 시뮬레이션 호출 (에러 디버깅 강화)
+        # 최종 물성 시뮬레이션 호출 (v6 캐시 갱신 버전)
         try:
-            final_report = calc.get_final_expert_simulation(
+            final_report = calc.run_simulation_v6(
                 ts_1st=ts_init, 
                 p2={'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
                 p3={'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
@@ -187,7 +187,7 @@ with tab_inverse:
         st.info("※ 1차 열처리 온도를 고정값으로 설정하여 합금 성분을 역설계합니다.")
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
-        inverse_results = calc.run_expert_inverse_engine(targets={
+        inverse_results = calc.run_inverse_v6(targets={
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
             'p1_temp': target_p1_temp,

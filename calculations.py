@@ -1,6 +1,6 @@
 import math
 
-__version__ = "6.1.1" # Stability Patch
+__version__ = "6.2.0" # Cache-Buster Update
 
 # [SECTION 1] 전문가용 1차 물리 엔진 (경화능 및 질량효과 정밀 반영)
 def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
@@ -68,24 +68,20 @@ def calculate_ceq_by_standard(comp, standard, **kwargs):
     cr, mo, v = comp.get('Cr', 0), comp.get('Mo', 0), comp.get('V', 0)
     ni, cu, b = comp.get('Ni', 0), comp.get('Cu', 0), comp.get('B', 0)
     
-    # 1. IIW (International Institute of Welding) - ASTM, ASME, EN ISO, DIN
     if standard == "IIW (ASTM/ASME/EN)":
         val = c + mn/6 + (cr+mo+v)/5 + (ni+cu)/15
         name = "Ceq (IIW)"
-    # 2. JIS (Japanese Industrial Standards)
     elif standard == "JIS":
         val = c + mn/6 + si/24 + ni/40 + cr/5 + mo/4 + v/14
         name = "Ceq (JIS)"
-    # 3. Pcm (Ito-Bessyo) - API, NORSOK
     elif standard == "Pcm (API/NORSOK)":
         val = c + si/30 + (mn+cu+cr)/20 + ni/60 + mo/15 + v/10 + 5*b
         name = "Pcm (Ito-Bessyo)"
-    # 4. CET (EN 1011-2)
     elif standard == "CET (European)":
         val = c + (mn+mo)/10 + (cr+cu)/20 + ni/40
         name = "CET"
     else:
-        val = c + mn/6 # Default simple Ceq
+        val = c + mn/6 
         name = "Ceq"
         
     return name, round(val, 3)
@@ -116,8 +112,8 @@ def predict_microstructure(comp, p1, thickness, **kwargs):
     else:
         return "Ferrite + Coarse Pearlite (F+P)", "매우 완만한 냉각으로 인해 조대한 펄라이트와 페라이트가 형성되었습니다."
 
-# [SECTION 2] 최종 물성 시뮬레이션
-def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard, **kwargs):
+# [SECTION 2] 최종 물성 시뮬레이션 (함수명 변경으로 캐시 갱신 강제)
+def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard, **kwargs):
     def calc_hjp(t, m, mode):
         if mode == "None" or m <= 0: return 0.0
         val = (t + 273.15) * (20 + math.log10(max(0.1, m / 60)))
@@ -161,11 +157,8 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1, thickness, 
         "ceq_val": ceq_val, "ceq_label": ceq_label, "micro_name": micro_name, "micro_desc": micro_desc
     }
 
-# [SECTION 3] 전문가용 역설계 엔진
-def run_expert_inverse_engine(targets, **kwargs):
-    """
-    목표 물성을 달성하기 위한 최적의 화학 성분과 열처리 조건을 제안합니다.
-    """
+# [SECTION 3] 전문가용 역설계 엔진 (함수명 변경으로 캐시 갱신 강제)
+def run_inverse_v6(targets, **kwargs):
     t_ys, t_ts, t_cvn = targets['ys'], targets['ts'], targets['cvn']
     t_el, t_ra, t_hb = targets.get('el', 20), targets.get('ra', 45), targets.get('hb', 210)
     t_temp, thick = targets['test_temp'], targets['thick']
