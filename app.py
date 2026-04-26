@@ -34,14 +34,13 @@ with st.sidebar:
     st.caption(f"Build Date: {datetime.now().strftime('%Y-%m-%d')}")
 
 # [MAIN TABS INTERFACE]
-# 이미지 3번에서 보여주신 '역설계' 기능을 정식 탭으로 분리 구현했습니다.
 tab_predict, tab_inverse = st.tabs(["🚀 정밀 물성 예측 시뮬레이션", "🔄 전문가용 역설계 엔진 (Inverse)"])
 
 # --- TAB 1: 물성 예측 ---
 with tab_predict:
     st.header("1️⃣ 화학 성분 정밀 설계 (20 Elements Analysis)")
     
-    # 20종 원소 입력을 위한 그리드 배치 (축약 없이 전개)
+    # 20종 원소 입력을 위한 그리드 배치
     user_composition = {}
     col_row1 = st.columns(5); col_row2 = st.columns(5); col_row3 = st.columns(5); col_row4 = st.columns(5)
     
@@ -81,29 +80,28 @@ with tab_predict:
         p3_cool = st.selectbox("냉각 방식", ["공냉(AC)", "노냉(FC)"], key="p3_cool_select")
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
-        # 1차 물성 엔진 호출
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
         
-        # 최종 물성 시뮬레이션 호출
         final_report = calc.get_final_expert_simulation(
             ts_init, 
-            {'type':p2_type, 'temp':p2_temp, 'time':p2_t, 'cooling':p2_cool},
-            {'type':p3_type, 'temp':p3_temp, 'time':p3_t, 'cooling':p3_cool},
+            {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
+            {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
             input_test_temp, user_composition
         )
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
-        m_cols = st.columns(5)
+        m_cols = st.columns(6)
         m_cols[0].metric("항복강도 (YS)", f"{final_report['ys']} MPa")
         m_cols[1].metric("인장강도 (TS)", f"{final_report['ts']} MPa")
         m_cols[2].metric("연신율 (EL)", f"{final_report['el']} %")
-        m_cols[3].metric("브리넬 경도 (HB)", f"{final_report['hb']}")
-        m_cols[4].metric("충격치 (CVN)", f"{final_report['cvn']} J")
+        m_cols[3].metric("단면수축률 (RA)", f"{final_report['ra']} %")
+        m_cols[4].metric("브리넬 경도 (HB)", f"{final_report['hb']}")
+        m_cols[5].metric("충격치 (CVN)", f"{final_report['cvn']} J")
         
         if IS_PLOTLY_AVAILABLE:
             radar_fig = go.Figure(data=go.Scatterpolar(
-                r=[final_report['ts']/10, final_report['el']*2, final_report['hb']/2, final_report['cvn']],
-                theta=['TS','EL','HB','CVN'], fill='toself', name='Predicted Property'
+                r=[final_report['ts']/10, final_report['el']*2, final_report['ra']*1.5, final_report['hb']/2, final_report['cvn']],
+                theta=['TS','EL','RA','HB','CVN'], fill='toself', name='Predicted Property'
             ))
             st.plotly_chart(radar_fig, use_container_width=True)
 
@@ -112,21 +110,27 @@ with tab_inverse:
     st.header("🔄 전문가용 역설계 엔진 (Inverse Engineering)")
     st.write("목표하는 기계적 물성을 입력하면, Sentinel-Alpha가 최적의 합금 성분과 열처리 조건을 역으로 제안합니다.")
     
-    ir_col1, ir_col2 = st.columns(2)
+    ir_col1, ir_col2, ir_col3 = st.columns(3)
     with ir_col1:
         target_ys = st.number_input("목표 항복강도 (MPa)", 300, 1300, 485)
         target_ts = st.number_input("목표 인장강도 (MPa)", 400, 1500, 625)
+        target_p1_temp = st.number_input("1차 오스테나이트화 온도 (℃)", 700, 1200, 1050)
     with ir_col2:
+        target_el = st.number_input("목표 연신율 (%)", 5, 50, 22)
+        target_ra = st.number_input("목표 단면수축률 (%)", 10, 80, 45)
+    with ir_col3:
+        target_hb = st.number_input("목표 경도 (HB)", 100, 500, 210)
         target_cvn = st.number_input("목표 충격치 (J)", 10, 300, 65)
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
         inverse_results = calc.run_expert_inverse_engine({
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
+            'el': target_el, 'ra': target_ra, 'hb': target_hb,
+            'p1_temp': target_p1_temp,
             'test_temp': input_test_temp, 'thick': input_thickness
         })
         
         st.success("### [Sentinel-Alpha 추천 최적 설계 사양]")
-        
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
         st.dataframe(pd.DataFrame([inverse_results['alloy']]), use_container_width=True)
         
