@@ -3,8 +3,12 @@ import pandas as pd
 import numpy as np
 import calculations as calc
 from datetime import datetime
+import importlib
 
-__version__ = "6.1.0" # Professional Upgrade Version
+# [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
+importlib.reload(calc)
+
+__version__ = "6.2.1" # Force Reload Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
