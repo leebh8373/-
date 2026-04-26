@@ -71,21 +71,33 @@ with tab_predict:
         st.subheader("📦 1차: 오스테나이트화")
         p1_type = st.selectbox("공정 종류", ["Quenching", "Normalizing", "Annealing"], key="p1_type_select")
         p1_temp = st.number_input("오스테나이트화 온도 (℃)", min_value=700, max_value=1200, value=1050, step=10, key="p1_temp_input")
-        p1_time = st.number_input("가열 유지 시간 (min)", 10, 5000, 360, key="p1_time_input")
+        st.write("가열 유지 시간")
+        t_col1, t_col2 = st.columns(2)
+        p1_h = t_col1.number_input("시간(hr)", 0, 100, 6, key="p1_h")
+        p1_m = t_col2.number_input("분(min)", 0, 59, 0, key="p1_m")
+        p1_time = p1_h * 60 + p1_m
         p1_cool = st.selectbox("냉각 방식", ["수냉(WQ)", "유냉(OQ)", "공냉(AC)"], key="p1_cool_select")
     
     with c2:
         st.subheader("🔥 2차: 뜨임/응력제거")
-        p2_type = st.selectbox("공정 종류", ["None", "Tempering", "S/R"], index=1, key="p2_type_select")
-        p2_temp = st.number_input("열처리 온도 (℃)", 0, 850, 610, key="p2_temp_input")
-        p2_time = st.number_input("가열 유지 시간 (min)", 0, 5000, 240, key="p2_time_input")
+        p2_type = st.selectbox("공정 종류", ["None", "Tempering", "Normalizing", "Annealing"], index=1, key="p2_type_select")
+        p2_temp = st.number_input("열처리 온도 (℃)", 0, 1200, 610, key="p2_temp_input")
+        st.write("가열 유지 시간")
+        t_col1, t_col2 = st.columns(2)
+        p2_h = t_col1.number_input("시간(hr)", 0, 100, 4, key="p2_h")
+        p2_m = t_col2.number_input("분(min)", 0, 59, 0, key="p2_m")
+        p2_time = p2_h * 60 + p2_m
         p2_cool = st.selectbox("냉각 방식", ["수냉(WQ)", "공냉(AC)", "노냉(FC)"], index=1, key="p2_cool_select")
         
     with c3:
         st.subheader("❄️ 3차: 최종 PWHT")
         p3_type = st.selectbox("공정 종류", ["None", "S/R", "PWHT"], index=1, key="p3_type_select")
         p3_temp = st.number_input("열처리 온도 (℃)", 0, 850, 625, key="p3_temp_input")
-        p3_time = st.number_input("가열 유지 시간 (min)", 0, 5000, 300, key="p3_time_input")
+        st.write("가열 유지 시간")
+        t_col1, t_col2 = st.columns(2)
+        p3_h = t_col1.number_input("시간(hr)", 0, 100, 5, key="p3_h")
+        p3_m = t_col2.number_input("분(min)", 0, 59, 0, key="p3_m")
+        p3_time = p3_h * 60 + p3_m
         p3_cool = st.selectbox("냉각 방식", ["공냉(AC)", "노냉(FC)"], key="p3_cool_select")
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
@@ -175,27 +187,26 @@ with tab_inverse:
     st.header("🔄 전문가용 역설계 엔진 (Inverse Engineering)")
     st.write("목표하는 기계적 물성을 입력하면, Sentinel-Alpha가 최적의 합금 성분과 열처리 조건을 역으로 제안합니다.")
     
+    st.subheader("🎯 목표 기계적 성질 및 설계 조건 (Targets & Specs)")
     ir_col1, ir_col2 = st.columns(2)
     with ir_col1:
-        st.subheader("🎯 목표 기계적 성질 (Targets)")
         target_ys = st.number_input("목표 항복강도 (MPa)", 300, 1300, 485)
         target_ts = st.number_input("목표 인장강도 (MPa)", 400, 1500, 625)
         target_el = st.number_input("목표 연신율 (%)", 5, 50, 22)
+    with ir_col2:
         target_ra = st.number_input("목표 단면수축률 (%)", 10, 80, 45)
         target_hb = st.number_input("목표 경도 (HB)", 100, 500, 210)
         target_cvn = st.number_input("목표 충격치 (J)", 10, 300, 65)
-        
-    with ir_col2:
-        st.subheader("🛠️ 설계 제약 조건 (Constraints)")
-        target_p1_temp = st.number_input("1차 오스테나이트화 온도 (℃)", 700, 1200, 1050)
-        st.info("※ 1차 열처리 온도를 고정값으로 설정하여 합금 성분을 역설계합니다.")
+    
+    st.divider()
+    target_thick = st.number_input("설계 대상 소재 두께 (mm)", 10, 2500, input_thickness)
+    st.info("※ 입력된 두께에 따라 질량 효과를 고려한 합금 성분 및 **1차 오스테나이트화 온도**가 자동으로 예측됩니다.")
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
         inverse_results = calc.run_inverse_v6(targets={
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
-            'p1_temp': target_p1_temp,
-            'test_temp': input_test_temp, 'thick': input_thickness,
+            'test_temp': input_test_temp, 'thick': target_thick,
             'ceq_standard': ceq_standard
         })
         
@@ -214,4 +225,7 @@ with tab_inverse:
         st.write("#### 2️⃣ 추천 열처리 공정 스케줄")
         p_list = [inverse_results['p1'], inverse_results['p2'], inverse_results['p3']]
         for idx, p in enumerate(p_list, 1):
-            st.info(f"**{idx}차 공정 ({p['mode']})**: {p['temp']}℃ / {p['time']}min / 냉각: :blue[{p['cool']}]")
+            h_val = p['time'] // 60
+            m_val = p['time'] % 60
+            time_str = f"{h_val}시간 {m_val}분" if h_val > 0 else f"{m_val}분"
+            st.info(f"**{idx}차 공정 ({p['mode']})**: {p['temp']}℃ / {time_str} / 냉각: :blue[{p['cool']}]")

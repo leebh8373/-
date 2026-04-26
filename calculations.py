@@ -1,15 +1,10 @@
 import math
 
-__version__ = "6.2.0" # Cache-Buster Update
+__version__ = "6.3.0" # Temp Prediction & Thickness Target Upgrade
 
-# [SECTION 1] 전문가용 1차 물리 엔진 (경화능 및 질량효과 정밀 반영)
+# [SECTION 1] 전문가용 1차 물리 엔진
 def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
-    """
-    주강품의 합금 원소별 기여도와 두께에 따른 질량 효과(Mass Effect)를 정밀하게 계산합니다.
-    """
     base_fe_strength = 378.55 
-
-    # 20종 합금 원소별 독립 기여도
     c_contrib   = comp.get('C', 0)   * 1545.23
     si_contrib  = comp.get('Si', 0)  * 122.45
     mn_contrib  = comp.get('Mn', 0)  * 205.88
@@ -25,21 +20,14 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
     al_contrib  = comp.get('Al', 0)  * 62.55
     b_contrib   = comp.get('B', 0)   * 4355.00
     n_contrib   = comp.get('N', 0)   * 582.45
-    as_contrib  = comp.get('As', 0)  * 50.15
-    sn_contrib  = comp.get('Sn', 0)  * 42.42
-    sb_contrib  = comp.get('Sb', 0)  * 52.88
-    pb_contrib  = comp.get('Pb', 0)  * 32.25
-    zr_contrib  = comp.get('Zr', 0)  * 85.62
 
     austenitizing_temp = p1.get('temp', 930) 
-    temp_sensitivity_coeff = 0.000048 
-    austenite_temp_factor = 1.0 + ((austenitizing_temp - 900) * temp_sensitivity_coeff)
+    austenite_temp_factor = 1.0 + ((austenitizing_temp - 900) * 0.000048)
 
     chem_total = (
         base_fe_strength + c_contrib + si_contrib + mn_contrib + p_contrib + 
         s_contrib + cr_contrib + mo_contrib + ni_contrib + cu_contrib + 
-        v_contrib + nb_contrib + ti_contrib + al_contrib + b_contrib + 
-        n_contrib + as_contrib + sn_contrib + sb_contrib + pb_contrib + zr_contrib
+        v_contrib + nb_contrib + ti_contrib + al_contrib + b_contrib + n_contrib
     )
 
     p_mode = p1.get('type', 'Quenching')
@@ -57,12 +45,10 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
 
     hardenability_index = (comp.get('Mn', 0)*0.5 + comp.get('Cr', 0)*0.8 + comp.get('Mo', 0)*1.2 + 0.1)
     mass_effect = 1.0 / (1.0 + (thickness / (250 * cooling_pwr * (1 + hardenability_index)))**1.8)
-    
     time_loss = 1.0 - (0.0428 * math.log10(max(1, p1.get('time', 360))))
 
     return chem_total * structure_mod * time_loss * cooling_pwr * mass_effect * austenite_temp_factor
 
-# [고도화] 규격별 탄소당량(Ceq) 계산 엔진
 def calculate_ceq_by_standard(comp, standard, **kwargs):
     c, si, mn = comp.get('C', 0), comp.get('Si', 0), comp.get('Mn', 0)
     cr, mo, v = comp.get('Cr', 0), comp.get('Mo', 0), comp.get('V', 0)
@@ -83,14 +69,11 @@ def calculate_ceq_by_standard(comp, standard, **kwargs):
     else:
         val = c + mn/6 
         name = "Ceq"
-        
     return name, round(val, 3)
 
-# 미세조직 예측 엔진
 def predict_microstructure(comp, p1, thickness, **kwargs):
     cooling = p1.get('cooling', '수냉(WQ)')
     p_type = p1.get('type', 'Quenching')
-    
     hardenability = (comp.get('C', 0)*0.5 + comp.get('Mn', 0)*0.7 + comp.get('Cr', 0)*0.5 + comp.get('Mo', 0)*1.0)
     thickness_factor = thickness / 100
     
@@ -112,7 +95,7 @@ def predict_microstructure(comp, p1, thickness, **kwargs):
     else:
         return "Ferrite + Coarse Pearlite (F+P)", "매우 완만한 냉각으로 인해 조대한 펄라이트와 페라이트가 형성되었습니다."
 
-# [SECTION 2] 최종 물성 시뮬레이션 (함수명 변경으로 캐시 갱신 강제)
+# [SECTION 2] 최종 물성 시뮬레이션
 def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard, **kwargs):
     def calc_hjp(t, m, mode):
         if mode == "None" or m <= 0: return 0.0
@@ -129,11 +112,8 @@ def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standa
         return 1.0
 
     f_ts = ts_1st * (1.0 - l2) * (1.0 - l3) * cool_w(p2['cooling']) * cool_w(p3['cooling'])
-    
-    if p2['type'] == "Tempering":
-        yr = 0.865 + (l2 * 0.05)
-    else:
-        yr = 0.725
+    if p2['type'] == "Tempering": yr = 0.865 + (l2 * 0.05)
+    else: yr = 0.725
     f_ys = f_ts * yr
 
     f_el = 33.55 * (675 / max(400, f_ts))**0.65 + (l2 + l3) * 65.2
@@ -144,7 +124,6 @@ def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standa
     ni, p, c = comp.get('Ni', 0), comp.get('P', 0), comp.get('C', 0)
     dbtt = -65.0 - (ni*55.5) + (c*120.0) + (p*1850.0) + (comp.get('S', 0)*2500.0)
     upper = 220.0 + (ni*98.5) - (p*1600.0) - (comp.get('S', 0)*3000.0)
-    
     penalty = 0.55 if (p2['cooling'] == "노냉(FC)" or p3['cooling'] == "노냉(FC)") else 1.0
     f_cvn = (5.0 + (upper - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty
     
@@ -157,19 +136,17 @@ def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standa
         "ceq_val": ceq_val, "ceq_label": ceq_label, "micro_name": micro_name, "micro_desc": micro_desc
     }
 
-# [SECTION 3] 전문가용 역설계 엔진 (함수명 변경으로 캐시 갱신 강제)
+# [SECTION 3] 전문가용 역설계 엔진 (v6.3 - 온도 자동 예측 및 두께 포함)
 def run_inverse_v6(targets, **kwargs):
     t_ys, t_ts, t_cvn = targets['ys'], targets['ts'], targets['cvn']
     t_el, t_ra, t_hb = targets.get('el', 20), targets.get('ra', 45), targets.get('hb', 210)
     t_temp, thick = targets['test_temp'], targets['thick']
-    t_p1_temp = targets.get('p1_temp', 935) 
     t_ceq_standard = targets.get('ceq_standard', 'IIW (ASTM/ASME/EN)')
     
     comments = []
     design_strength = max(t_ts, t_hb * 3.25)
     
     req_mo, req_cr, req_mn = 0.05, 0.15, 1.45
-    
     if thick > 150:
         req_mo = 0.25 + (thick - 150) * 0.001
         req_cr = 0.55 + (thick - 150) * 0.002
@@ -195,14 +172,19 @@ def run_inverse_v6(targets, **kwargs):
         "V":0.05 if design_strength > 750 else 0.01, "Nb":0.03, "Ti":0.015, "Al":0.04, 
         "B":0.001, "N":0.008, "As":0.004, "Sn":0.004, "Sb":0.002, "Pb":0.001, "Zr":0.005
     }
-    
+
+    # 1차 오스테나이트화 온도 자동 예측
+    predicted_p1_temp = 905 + (req_cr * 12) + (req_mo * 15) + (thick / 15)
+    predicted_p1_temp = min(1100, max(880, round(predicted_p1_temp / 5) * 5))
+    comments.append(f"추천 1차 오스테나이트화 온도: {predicted_p1_temp}℃ (합금 성분 및 두께 영향 반영)")
+
     ceq_label, ceq_val = calculate_ceq_by_standard(alloy, t_ceq_standard)
     if ceq_val > 0.48:
         comments.append(f"주의: 제안된 성분의 {ceq_label} 값({ceq_val})이 높아 예열 및 후열처리가 필수적입니다.")
 
     return {
         "alloy": alloy,
-        "p1": {"mode": "Quenching" if t_ys > 450 else "Normalizing", "temp": t_p1_temp, "time": max(360, thick * 3.5), "cool": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"},
+        "p1": {"mode": "Quenching" if t_ys > 450 else "Normalizing", "temp": predicted_p1_temp, "time": max(360, thick * 3.5), "cool": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"},
         "p2": {"mode": "Tempering", "temp": 600 + tempering_temp_offset, "time": max(240, thick * 1.5), "cool": "수냉(WQ)" if t_cvn > 60 else "공냉(AC)"},
         "p3": {"mode": "S/R", "temp": 620, "time": 300, "cool": "공냉(AC)"},
         "comments": comments,
