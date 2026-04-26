@@ -234,7 +234,7 @@ with tab_inverse:
             with st.expander("🧐 전문가 분석 의견 (Technical Insights)", expanded=True):
                 for comment in inverse_results['comments']:
                     st.write(f"- {comment}")
-                st.info(f"**{inverse_results['ceq_label']}:** {inverse_results['ceq_val']} (규격: {ceq_standard})")
+                st.info(f"**{inverse_results['ceq_label']}:** {inverse_results['ceq_val']} (규격: {ceq_std})")
 
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
         st.dataframe(pd.DataFrame([inverse_results['alloy']]), use_container_width=True)
