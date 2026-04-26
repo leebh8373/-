@@ -1,9 +1,9 @@
 import math
 
-__version__ = "6.1.0"
+__version__ = "6.1.1" # Stability Patch
 
 # [SECTION 1] 전문가용 1차 물리 엔진 (경화능 및 질량효과 정밀 반영)
-def calculate_1st_stage_physics(comp, p1, thickness):
+def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
     """
     주강품의 합금 원소별 기여도와 두께에 따른 질량 효과(Mass Effect)를 정밀하게 계산합니다.
     """
@@ -63,7 +63,7 @@ def calculate_1st_stage_physics(comp, p1, thickness):
     return chem_total * structure_mod * time_loss * cooling_pwr * mass_effect * austenite_temp_factor
 
 # [고도화] 규격별 탄소당량(Ceq) 계산 엔진
-def calculate_ceq_by_standard(comp, standard):
+def calculate_ceq_by_standard(comp, standard, **kwargs):
     c, si, mn = comp.get('C', 0), comp.get('Si', 0), comp.get('Mn', 0)
     cr, mo, v = comp.get('Cr', 0), comp.get('Mo', 0), comp.get('V', 0)
     ni, cu, b = comp.get('Ni', 0), comp.get('Cu', 0), comp.get('B', 0)
@@ -91,7 +91,7 @@ def calculate_ceq_by_standard(comp, standard):
     return name, round(val, 3)
 
 # 미세조직 예측 엔진
-def predict_microstructure(comp, p1, thickness):
+def predict_microstructure(comp, p1, thickness, **kwargs):
     cooling = p1.get('cooling', '수냉(WQ)')
     p_type = p1.get('type', 'Quenching')
     
@@ -117,7 +117,7 @@ def predict_microstructure(comp, p1, thickness):
         return "Ferrite + Coarse Pearlite (F+P)", "매우 완만한 냉각으로 인해 조대한 펄라이트와 페라이트가 형성되었습니다."
 
 # [SECTION 2] 최종 물성 시뮬레이션
-def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard):
+def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard, **kwargs):
     def calc_hjp(t, m, mode):
         if mode == "None" or m <= 0: return 0.0
         val = (t + 273.15) * (20 + math.log10(max(0.1, m / 60)))
@@ -162,7 +162,10 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1, thickness, 
     }
 
 # [SECTION 3] 전문가용 역설계 엔진
-def run_expert_inverse_engine(targets):
+def run_expert_inverse_engine(targets, **kwargs):
+    """
+    목표 물성을 달성하기 위한 최적의 화학 성분과 열처리 조건을 제안합니다.
+    """
     t_ys, t_ts, t_cvn = targets['ys'], targets['ts'], targets['cvn']
     t_el, t_ra, t_hb = targets.get('el', 20), targets.get('ra', 45), targets.get('hb', 210)
     t_temp, thick = targets['test_temp'], targets['thick']

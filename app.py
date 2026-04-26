@@ -86,17 +86,25 @@ with tab_predict:
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
-        # 최종 물성 시뮬레이션 호출 (키워드 인자 사용으로 안전성 확보)
-        final_report = calc.get_final_expert_simulation(
-            ts_1st=ts_init, 
-            p2={'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
-            p3={'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
-            test_temp=input_test_temp, 
-            comp=user_composition,
-            p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
-            thickness=input_thickness,
-            ceq_standard=ceq_standard
-        )
+        # 최종 물성 시뮬레이션 호출 (에러 디버깅 강화)
+        try:
+            final_report = calc.get_final_expert_simulation(
+                ts_1st=ts_init, 
+                p2={'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
+                p3={'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
+                test_temp=input_test_temp, 
+                comp=user_composition,
+                p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
+                thickness=input_thickness,
+                ceq_standard=ceq_standard
+            )
+        except TypeError as e:
+            st.error(f"⚠️ 시뮬레이션 엔진 호출 오류 (TypeError): {e}")
+            st.info("임시 해결책: 페이지를 새로고침(F5)하거나 관리자에게 문의하세요.")
+            st.stop()
+        except Exception as e:
+            st.error(f"⚠️ 시뮬레이션 실행 중 예상치 못한 오류 발생: {e}")
+            st.stop()
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
         m_cols1 = st.columns(3)
