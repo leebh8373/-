@@ -221,6 +221,7 @@ with tab_inverse:
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
         inverse_results = calc.run_inverse_v6(targets={
+            'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
             'test_temp': input_test_temp, 'thick': target_thick,
             'ceq_standard': ceq_std
