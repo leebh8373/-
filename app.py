@@ -17,7 +17,9 @@ st.set_page_config(page_title="Sentinel-Alpha v6.0", layout="wide")
 # [CSS CUSTOM STYLE]
 st.markdown("""
     <style>
-    .stMetric { background-color: #f0f2f6; padding: 15px; border-radius: 8px; border: 1px solid #d1d5db; }
+    .stMetric { background-color: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155; color: white; }
+    .stMetric label { color: #94a3b8 !important; font-weight: bold; }
+    .stMetric [data-testid="stMetricValue"] { color: #ffffff !important; font-weight: 800; }
     .main-title { color: #1e3a8a; font-size: 32px; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
@@ -29,6 +31,7 @@ with st.sidebar:
     st.header("⚙️ 기초 공정 변수 설정")
     input_thickness = st.number_input("주물 단면 두께 (mm)", min_value=10, max_value=2500, value=150, step=10)
     input_test_temp = st.selectbox("충격 시험 온도 (℃)", [20, 0, -20, -46, -60, -101], index=3)
+    ceq_standard = st.selectbox("Ceq/Pcm 계산 규격", ["IIW (ASTM/ASME/EN)", "JIS", "Pcm (API/NORSOK)", "CET (European)"])
     st.divider()
     st.info("Pusan National Univ. Metal Materials Lab\nQuality Management Specialist System")
     st.caption(f"Build Date: {datetime.now().strftime('%Y-%m-%d')}")
@@ -81,22 +84,38 @@ with tab_predict:
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
-        
+        # 최종 물성 시뮬레이션 호출
         final_report = calc.get_final_expert_simulation(
             ts_init, 
             {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
             {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
-            input_test_temp, user_composition
+            input_test_temp, user_composition,
+            {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
+            input_thickness,
+            ceq_standard
         )
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
-        m_cols = st.columns(6)
-        m_cols[0].metric("항복강도 (YS)", f"{final_report['ys']} MPa")
-        m_cols[1].metric("인장강도 (TS)", f"{final_report['ts']} MPa")
-        m_cols[2].metric("연신율 (EL)", f"{final_report['el']} %")
-        m_cols[3].metric("단면수축률 (RA)", f"{final_report['ra']} %")
-        m_cols[4].metric("브리넬 경도 (HB)", f"{final_report['hb']}")
-        m_cols[5].metric("충격치 (CVN)", f"{final_report['cvn']} J")
+        m_cols1 = st.columns(3)
+        m_cols1[0].metric("항복강도 (YS)", f"{final_report['ys']} MPa")
+        m_cols1[1].metric("인장강도 (TS)", f"{final_report['ts']} MPa")
+        m_cols1[2].metric("브리넬 경도 (HB)", f"{final_report['hb']}")
+        
+        m_cols2 = st.columns(3)
+        m_cols2[0].metric("연신율 (EL)", f"{final_report['el']} %")
+        m_cols2[1].metric("단면수축률 (RA)", f"{final_report['ra']} %")
+        m_cols2[2].metric("충격치 (CVN)", f"{final_report['cvn']} J")
+
+        st.divider()
+        st.subheader("🧪 화학적/야금학적 특성 (Chemical & Metallurgical)")
+        t_cols = st.columns(2)
+        t_cols[0].metric(f"{final_report['ceq_label']}", f"{final_report['ceq_val']}")
+        t_cols[1].info(f"**적용 규격:** {ceq_standard}")
+
+        with st.expander("🔬 예상 미세조직 (Estimated Microstructure)", expanded=True):
+            c_left, c_right = st.columns([1, 2])
+            c_left.info(f"**주요 조직명:**\n\n### {final_report['micro_name']}")
+            c_right.warning(f"**조직 구조 및 특징:**\n\n{final_report['micro_desc']}")
         
         if IS_PLOTLY_AVAILABLE:
             radar_fig = go.Figure(data=go.Scatterpolar(
@@ -161,7 +180,8 @@ with tab_inverse:
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
             'p1_temp': target_p1_temp,
-            'test_temp': input_test_temp, 'thick': input_thickness
+            'test_temp': input_test_temp, 'thick': input_thickness,
+            'ceq_standard': ceq_standard
         })
         
         st.success("### [Sentinel-Alpha 추천 최적 설계 사양]")
@@ -171,7 +191,7 @@ with tab_inverse:
             with st.expander("🧐 전문가 분석 의견 (Technical Insights)", expanded=True):
                 for comment in inverse_results['comments']:
                     st.write(f"- {comment}")
-                st.info(f"**제안 합금의 탄소당량 (Ceq):** {inverse_results['ceq']}")
+                st.info(f"**{inverse_results['ceq_label']}:** {inverse_results['ceq_val']} (규격: {ceq_standard})")
 
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
         st.dataframe(pd.DataFrame([inverse_results['alloy']]), use_container_width=True)
