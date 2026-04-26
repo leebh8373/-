@@ -37,7 +37,9 @@ with st.sidebar:
     st.header("⚙️ 기초 공정 변수 설정")
     input_thickness = st.number_input("주물 단면 두께 (mm)", min_value=10, max_value=2500, value=150, step=10)
     input_test_temp = st.selectbox("충격 시험 온도 (℃)", [20, 0, -20, -46, -60, -101], index=3)
-    ceq_standard = st.selectbox("대표 탄소당량 규격 (Inverse Engine용)", ["IIW (ASTM/ASME/EN)", "JIS", "Pcm (API/NORSOK)", "CET (European)"])
+    c_col1, c_col2 = st.columns(2)
+    ceq_std = c_col1.selectbox("Ceq 규격", ["IIW (ASTM/ASME/EN)", "JIS", "CET (European)"])
+    pcm_std = c_col2.selectbox("Pcm 규격", ["Pcm (Ito-Bessyo)", "None"])
     st.divider()
     st.info("Pusan National Univ. Metal Materials Lab\nQuality Management Specialist System")
     st.caption(f"Build Date: {datetime.now().strftime('%Y-%m-%d')}")
@@ -112,7 +114,7 @@ with tab_predict:
                 comp=user_composition,
                 p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
                 thickness=input_thickness,
-                ceq_standard=ceq_standard
+                ceq_standard=ceq_std
             )
         except TypeError as e:
             st.error(f"⚠️ 시뮬레이션 엔진 호출 오류 (TypeError): {e}")
@@ -135,12 +137,21 @@ with tab_predict:
 
         st.divider()
         st.subheader("🧪 탄소당량 분석 (Carbon Equivalent Analysis)")
-        ceq_cols = st.columns(4)
         ceq_all = final_report['ceq_all']
-        ceq_cols[0].metric("Ceq (IIW)", f"{ceq_all['ceq_iiw']}")
-        ceq_cols[1].metric("Pcm (Ito-Bessyo)", f"{ceq_all['pcm']}")
-        ceq_cols[2].metric("Ceq (JIS)", f"{ceq_all['ceq_jis']}")
-        ceq_cols[3].metric("CET", f"{ceq_all['cet']}")
+        
+        # 선택된 규격에 따른 표시 로직
+        res_cols = st.columns(2)
+        
+        # Ceq 표시
+        ceq_map = {"IIW (ASTM/ASME/EN)": ("Ceq (IIW)", "ceq_iiw"), "JIS": ("Ceq (JIS)", "ceq_jis"), "CET (European)": ("CET", "cet")}
+        ceq_label, ceq_key = ceq_map.get(ceq_std)
+        res_cols[0].metric(ceq_label, f"{ceq_all[ceq_key]}")
+        
+        # Pcm 표시
+        if pcm_std != "None":
+            res_cols[1].metric("Pcm (Ito-Bessyo)", f"{ceq_all['pcm']}")
+        else:
+            res_cols[1].info("Pcm 표시 안 함")
         
         st.divider()
         st.subheader("🔬 미세조직 및 야금학적 특성")
@@ -210,10 +221,9 @@ with tab_inverse:
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
         inverse_results = calc.run_inverse_v6(targets={
-            'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
             'test_temp': input_test_temp, 'thick': target_thick,
-            'ceq_standard': ceq_standard
+            'ceq_standard': ceq_std
         })
         
         st.success("### [Sentinel-Alpha 추천 최적 설계 사양]")
