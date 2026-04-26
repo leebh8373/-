@@ -50,26 +50,34 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
     return chem_total * structure_mod * time_loss * cooling_pwr * mass_effect * austenite_temp_factor
 
 def calculate_ceq_by_standard(comp, standard, **kwargs):
+    results = calculate_all_equivalents(comp)
+    if standard == "IIW (ASTM/ASME/EN)":
+        return "Ceq (IIW)", results["ceq_iiw"]
+    elif standard == "JIS":
+        return "Ceq (JIS)", results["ceq_jis"]
+    elif standard == "Pcm (API/NORSOK)":
+        return "Pcm (Ito-Bessyo)", results["pcm"]
+    elif standard == "CET (European)":
+        return "CET", results["cet"]
+    else:
+        return "Ceq", results["ceq_iiw"]
+
+def calculate_all_equivalents(comp):
     c, si, mn = comp.get('C', 0), comp.get('Si', 0), comp.get('Mn', 0)
     cr, mo, v = comp.get('Cr', 0), comp.get('Mo', 0), comp.get('V', 0)
     ni, cu, b = comp.get('Ni', 0), comp.get('Cu', 0), comp.get('B', 0)
     
-    if standard == "IIW (ASTM/ASME/EN)":
-        val = c + mn/6 + (cr+mo+v)/5 + (ni+cu)/15
-        name = "Ceq (IIW)"
-    elif standard == "JIS":
-        val = c + mn/6 + si/24 + ni/40 + cr/5 + mo/4 + v/14
-        name = "Ceq (JIS)"
-    elif standard == "Pcm (API/NORSOK)":
-        val = c + si/30 + (mn+cu+cr)/20 + ni/60 + mo/15 + v/10 + 5*b
-        name = "Pcm (Ito-Bessyo)"
-    elif standard == "CET (European)":
-        val = c + (mn+mo)/10 + (cr+cu)/20 + ni/40
-        name = "CET"
-    else:
-        val = c + mn/6 
-        name = "Ceq"
-    return name, round(val, 3)
+    ceq_iiw = c + mn/6 + (cr+mo+v)/5 + (ni+cu)/15
+    ceq_jis = c + mn/6 + si/24 + ni/40 + cr/5 + mo/4 + v/14
+    pcm = c + si/30 + (mn+cu+cr)/20 + ni/60 + mo/15 + v/10 + 5*b
+    cet = c + (mn+mo)/10 + (cr+cu)/20 + ni/40
+    
+    return {
+        "ceq_iiw": round(ceq_iiw, 3),
+        "ceq_jis": round(ceq_jis, 3),
+        "pcm": round(pcm, 3),
+        "cet": round(cet, 3)
+    }
 
 def predict_microstructure(comp, p1, thickness, **kwargs):
     cooling = p1.get('cooling', '수냉(WQ)')
@@ -96,7 +104,7 @@ def predict_microstructure(comp, p1, thickness, **kwargs):
         return "Ferrite + Coarse Pearlite (F+P)", "매우 완만한 냉각으로 인해 조대한 펄라이트와 페라이트가 형성되었습니다."
 
 # [SECTION 2] 최종 물성 시뮬레이션
-def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standard, **kwargs):
+def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickness=150, ceq_standard="IIW (ASTM/ASME/EN)", **kwargs):
     def calc_hjp(t, m, mode):
         if mode == "None" or m <= 0: return 0.0
         val = (t + 273.15) * (20 + math.log10(max(0.1, m / 60)))
@@ -128,16 +136,26 @@ def run_simulation_v6(ts_1st, p2, p3, test_temp, comp, p1, thickness, ceq_standa
     f_cvn = (5.0 + (upper - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty
     
     ceq_label, ceq_val = calculate_ceq_by_standard(comp, ceq_standard)
-    micro_name, micro_desc = predict_microstructure(comp, p1, thickness)
+    ceq_all = calculate_all_equivalents(comp)
+    
+    if p1 is None:
+        micro_name, micro_desc = "N/A", "공정 정보 부족으로 조직을 예측할 수 없습니다."
+    else:
+        micro_name, micro_desc = predict_microstructure(comp, p1, thickness)
     
     return {
         "ys":round(f_ys,1), "ts":round(f_ts,1), "el":round(f_el,1), 
         "ra":round(f_ra,1), "hb":round(f_hb,1), "cvn":round(f_cvn,1),
-        "ceq_val": ceq_val, "ceq_label": ceq_label, "micro_name": micro_name, "micro_desc": micro_desc
+        "ceq_val": ceq_val, "ceq_label": ceq_label, 
+        "ceq_all": ceq_all,
+        "micro_name": micro_name, "micro_desc": micro_desc
     }
 
+# Backward Compatibility Alias
+run_simulation_v6 = get_final_expert_simulation
+
 # [SECTION 3] 전문가용 역설계 엔진 (v6.3 - 온도 자동 예측 및 두께 포함)
-def run_inverse_v6(targets, **kwargs):
+def run_expert_inverse_engine(targets, **kwargs):
     t_ys, t_ts, t_cvn = targets['ys'], targets['ts'], targets['cvn']
     t_el, t_ra, t_hb = targets.get('el', 20), targets.get('ra', 45), targets.get('hb', 210)
     t_temp, thick = targets['test_temp'], targets['thick']
@@ -190,3 +208,6 @@ def run_inverse_v6(targets, **kwargs):
         "comments": comments,
         "ceq_val": ceq_val, "ceq_label": ceq_label
     }
+
+# Backward Compatibility Alias
+run_inverse_v6 = run_expert_inverse_engine

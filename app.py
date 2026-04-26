@@ -37,7 +37,7 @@ with st.sidebar:
     st.header("⚙️ 기초 공정 변수 설정")
     input_thickness = st.number_input("주물 단면 두께 (mm)", min_value=10, max_value=2500, value=150, step=10)
     input_test_temp = st.selectbox("충격 시험 온도 (℃)", [20, 0, -20, -46, -60, -101], index=3)
-    ceq_standard = st.selectbox("Ceq/Pcm 계산 규격", ["IIW (ASTM/ASME/EN)", "JIS", "Pcm (API/NORSOK)", "CET (European)"])
+    ceq_standard = st.selectbox("대표 탄소당량 규격 (Inverse Engine용)", ["IIW (ASTM/ASME/EN)", "JIS", "Pcm (API/NORSOK)", "CET (European)"])
     st.divider()
     st.info("Pusan National Univ. Metal Materials Lab\nQuality Management Specialist System")
     st.caption(f"Build Date: {datetime.now().strftime('%Y-%m-%d')}")
@@ -134,10 +134,16 @@ with tab_predict:
         m_cols2[2].metric("충격치 (CVN)", f"{final_report['cvn']} J")
 
         st.divider()
-        st.subheader("🧪 화학적/야금학적 특성 (Chemical & Metallurgical)")
-        t_cols = st.columns(2)
-        t_cols[0].metric(f"{final_report['ceq_label']}", f"{final_report['ceq_val']}")
-        t_cols[1].info(f"**적용 규격:** {ceq_standard}")
+        st.subheader("🧪 탄소당량 분석 (Carbon Equivalent Analysis)")
+        ceq_cols = st.columns(4)
+        ceq_all = final_report['ceq_all']
+        ceq_cols[0].metric("Ceq (IIW)", f"{ceq_all['ceq_iiw']}")
+        ceq_cols[1].metric("Pcm (Ito-Bessyo)", f"{ceq_all['pcm']}")
+        ceq_cols[2].metric("Ceq (JIS)", f"{ceq_all['ceq_jis']}")
+        ceq_cols[3].metric("CET", f"{ceq_all['cet']}")
+        
+        st.divider()
+        st.subheader("🔬 미세조직 및 야금학적 특성")
 
         with st.expander("🔬 예상 미세조직 (Estimated Microstructure)", expanded=True):
             c_left, c_right = st.columns([1, 2])
