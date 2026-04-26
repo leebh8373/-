@@ -4,6 +4,8 @@ import numpy as np
 import calculations as calc
 from datetime import datetime
 
+__version__ = "6.1.0" # Professional Upgrade Version
+
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
     import plotly.graph_objects as go
@@ -84,15 +86,16 @@ with tab_predict:
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
-        # 최종 물성 시뮬레이션 호출
+        # 최종 물성 시뮬레이션 호출 (키워드 인자 사용으로 안전성 확보)
         final_report = calc.get_final_expert_simulation(
-            ts_init, 
-            {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
-            {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
-            input_test_temp, user_composition,
-            {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
-            input_thickness,
-            ceq_standard
+            ts_1st=ts_init, 
+            p2={'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
+            p3={'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
+            test_temp=input_test_temp, 
+            comp=user_composition,
+            p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
+            thickness=input_thickness,
+            ceq_standard=ceq_standard
         )
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
@@ -176,7 +179,7 @@ with tab_inverse:
         st.info("※ 1차 열처리 온도를 고정값으로 설정하여 합금 성분을 역설계합니다.")
         
     if st.button("🔍 최적 설계 시나리오 도출", use_container_width=True):
-        inverse_results = calc.run_expert_inverse_engine({
+        inverse_results = calc.run_expert_inverse_engine(targets={
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
             'p1_temp': target_p1_temp,

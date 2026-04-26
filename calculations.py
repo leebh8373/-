@@ -1,5 +1,7 @@
 import math
 
+__version__ = "6.1.0"
+
 # [SECTION 1] 전문가용 1차 물리 엔진 (경화능 및 질량효과 정밀 반영)
 def calculate_1st_stage_physics(comp, p1, thickness):
     """
