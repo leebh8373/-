@@ -207,9 +207,9 @@ with tab_inverse:
     st.subheader("🎯 목표 기계적 성질 및 설계 조건 (Targets & Specs)")
     ir_col1, ir_col2 = st.columns(2)
     with ir_col1:
-        target_ys = st.number_input("목표 항복강도 (MPa)", 300, 1300, 485)
-        target_ts = st.number_input("목표 인장강도 (MPa)", 400, 1500, 625)
-        target_el = st.number_input("목표 연신율 (%)", 5, 50, 22)
+        target_ys = st.number_input("목표 항복강도 (MPa)", 100, 1500, 485)
+        target_ts = st.number_input("목표 인장강도 (MPa)", 200, 2000, 625)
+        target_el = st.number_input("목표 연신율 (%)", 5, 80, 22)
     with ir_col2:
         target_ra = st.number_input("목표 단면수축률 (%)", 10, 80, 45)
         target_hb = st.number_input("목표 경도 (HB)", 100, 500, 210)
@@ -234,15 +234,59 @@ with tab_inverse:
             with st.expander("🧐 전문가 분석 의견 (Technical Insights)", expanded=True):
                 for comment in inverse_results['comments']:
                     st.write(f"- {comment}")
-                st.info(f"**{inverse_results['ceq_label']}:** {inverse_results['ceq_val']} (규격: {ceq_std})")
+                
+                info_text = f"**{inverse_results['ceq_label']}:** {inverse_results['ceq_val']} (규격: {ceq_std})"
+                if pcm_std != "None" and 'ceq_all' in inverse_results:
+                    info_text += f" &nbsp;|&nbsp; **Pcm (Ito-Bessyo):** {inverse_results['ceq_all']['pcm']}"
+                st.info(info_text)
 
+        st.divider()
+        st.subheader("🔬 예측 미세조직 및 야금학적 구조")
+        with st.expander("🔬 역설계 조건부 예상 미세조직 (Estimated Microstructure)", expanded=True):
+            c_left, c_right = st.columns([1, 2])
+            c_left.info(f"**주요 조직명:**\n\n### {inverse_results.get('micro_name', 'N/A')}")
+            c_right.warning(f"**조직 구조 및 특징:**\n\n{inverse_results.get('micro_desc', 'N/A')}")
+
+        st.divider()
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
         st.dataframe(pd.DataFrame([inverse_results['alloy']]), use_container_width=True)
         
         st.write("#### 2️⃣ 추천 열처리 공정 스케줄")
         p_list = [inverse_results['p1'], inverse_results['p2'], inverse_results['p3']]
         for idx, p in enumerate(p_list, 1):
-            h_val = p['time'] // 60
-            m_val = p['time'] % 60
+            h_val = int(p['time']) // 60
+            m_val = int(p['time']) % 60
             time_str = f"{h_val}시간 {m_val}분" if h_val > 0 else f"{m_val}분"
             st.info(f"**{idx}차 공정 ({p['mode']})**: {p['temp']}℃ / {time_str} / 냉각: :blue[{p['cool']}]")
+
+        st.divider()
+        st.subheader("🔍 역설계 결과: 두께별 물성 민감도 분석 (Mass Effect Analysis)")
+        st.write("추천된 합금 성분 및 열처리 스케줄이 실제 제품 두께에 따라 강도에 미치는 영향을 시뮬레이션합니다.")
+        
+        thickness_range = np.linspace(10, max(1000, target_thick*2), 50)
+        inv_sim_results = []
+        inv_alloy = inverse_results['alloy']
+        inv_p1 = {'type': inverse_results['p1']['mode'], 'temp': inverse_results['p1']['temp'], 'time': inverse_results['p1']['time'], 'cooling': inverse_results['p1']['cool']}
+        inv_p2 = {'type': inverse_results['p2']['mode'], 'temp': inverse_results['p2']['temp'], 'time': inverse_results['p2']['time'], 'cooling': inverse_results['p2']['cool']}
+        inv_p3 = {'type': inverse_results['p3']['mode'], 'temp': inverse_results['p3']['temp'], 'time': inverse_results['p3']['time'], 'cooling': inverse_results['p3']['cool']}
+        
+        for t in thickness_range:
+            ts_1st = calc.calculate_1st_stage_physics(inv_alloy, inv_p1, t)
+            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy)
+            inv_sim_results.append({'Thickness': t, 'YS': rep['ys'], 'TS': rep['ts']})
+        
+        inv_sim_df = pd.DataFrame(inv_sim_results)
+        
+        if IS_PLOTLY_AVAILABLE:
+            fig_inv_sens = go.Figure()
+            fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['TS'], name='인장강도 (TS)', line=dict(color='#ef4444', width=3)))
+            fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['YS'], name='항복강도 (YS)', line=dict(color='#3b82f6', width=3, dash='dash')))
+            fig_inv_sens.update_layout(
+                title="역설계 도출 조건 적용 시 두께별 강도 변화",
+                xaxis_title="두께 (mm)", yaxis_title="강도 (MPa)",
+                hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_inv_sens.add_vline(x=target_thick, line_dash="dot", line_color="green", annotation_text=f"목표 두께: {target_thick}mm")
+            st.plotly_chart(fig_inv_sens, use_container_width=True)
+        else:
+            st.line_chart(inv_sim_df.set_index('Thickness'))

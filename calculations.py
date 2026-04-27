@@ -47,7 +47,8 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
     mass_effect = 1.0 / (1.0 + (thickness / (250 * cooling_pwr * (1 + hardenability_index)))**1.8)
     time_loss = 1.0 - (0.0428 * math.log10(max(1, p1.get('time', 360))))
 
-    return chem_total * structure_mod * time_loss * cooling_pwr * mass_effect * austenite_temp_factor
+    # 수정: cooling_pwr는 강도에 직접 곱해지는 것이 아니라 질량 효과(mass_effect)에만 영향을 미쳐야 함 (기존의 비정상적으로 높은 MPa 계산 오류 해결)
+    return chem_total * structure_mod * time_loss * mass_effect * austenite_temp_factor
 
 def calculate_ceq_by_standard(comp, standard, **kwargs):
     results = calculate_all_equivalents(comp)
@@ -124,16 +125,22 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickn
     else: yr = 0.725
     f_ys = f_ts * yr
 
-    f_el = 33.55 * (675 / max(400, f_ts))**0.65 + (l2 + l3) * 65.2
-    ra_factor = 2.45 - (f_ts / 2500)
+    # 주강품(Cast Steel) 특성을 반영한 연성 및 인성 예측식 보정 (미세 기공 및 결함 민감도 반영)
+    base_el = 22.5 * (600 / max(400, f_ts))**0.8
+    tempering_el_gain = (l2 + l3) * 15.0
+    f_el = base_el + tempering_el_gain
+    
+    ra_factor = 2.0 - (f_ts / 2000)
     f_ra = f_el * ra_factor 
     f_hb = f_ts / 3.25 
     
     ni, p, c = comp.get('Ni', 0), comp.get('P', 0), comp.get('C', 0)
     dbtt = -65.0 - (ni*55.5) + (c*120.0) + (p*1850.0) + (comp.get('S', 0)*2500.0)
-    upper = 220.0 + (ni*98.5) - (p*1600.0) - (comp.get('S', 0)*3000.0)
+    
+    # 주강품 특성 반영: upper shelf energy 하향 조정 
+    upper = 180.0 + (ni*85.0) - (p*1600.0) - (comp.get('S', 0)*3000.0)
     penalty = 0.55 if (p2['cooling'] == "노냉(FC)" or p3['cooling'] == "노냉(FC)") else 1.0
-    f_cvn = (5.0 + (upper - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty
+    f_cvn = (5.0 + (max(10.0, upper) - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty
     
     ceq_label, ceq_val = calculate_ceq_by_standard(comp, ceq_standard)
     ceq_all = calculate_all_equivalents(comp)
@@ -172,7 +179,7 @@ def run_expert_inverse_engine(targets, **kwargs):
         comments.append(f"두께({thick}mm) 질량 효과 극복을 위해 Mo, Cr 경화능 원소를 증량 설계하였습니다.")
     
     strength_from_alloys = (req_mo * 330) + (req_cr * 142) + (req_mn * 205)
-    req_c = max(0.18, (design_strength / (1.2 * 0.9) - 380 - strength_from_alloys) / 1545)
+    req_c = max(0.10, (design_strength / (1.2 * 0.9) - 380 - strength_from_alloys) / 1545)
     
     tempering_temp_offset = 0
     if t_el > 23.0 or t_ra > 52.0:
@@ -200,13 +207,19 @@ def run_expert_inverse_engine(targets, **kwargs):
     if ceq_val > 0.48:
         comments.append(f"주의: 제안된 성분의 {ceq_label} 값({ceq_val})이 높아 예열 및 후열처리가 필수적입니다.")
 
+    # 역설계 조건에 대한 미세조직 예측
+    p1_dict = {"type": "Quenching" if t_ys > 450 else "Normalizing", "cooling": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"}
+    micro_name, micro_desc = predict_microstructure(alloy, p1_dict, thick)
+
     return {
         "alloy": alloy,
-        "p1": {"mode": "Quenching" if t_ys > 450 else "Normalizing", "temp": predicted_p1_temp, "time": max(360, thick * 3.5), "cool": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"},
+        "p1": {"mode": p1_dict["type"], "temp": predicted_p1_temp, "time": max(360, thick * 3.5), "cool": p1_dict["cooling"]},
         "p2": {"mode": "Tempering", "temp": 600 + tempering_temp_offset, "time": max(240, thick * 1.5), "cool": "수냉(WQ)" if t_cvn > 60 else "공냉(AC)"},
         "p3": {"mode": "S/R", "temp": 620, "time": 300, "cool": "공냉(AC)"},
         "comments": comments,
-        "ceq_val": ceq_val, "ceq_label": ceq_label
+        "ceq_val": ceq_val, "ceq_label": ceq_label,
+        "ceq_all": calculate_all_equivalents(alloy),
+        "micro_name": micro_name, "micro_desc": micro_desc
     }
 
 # Backward Compatibility Alias
