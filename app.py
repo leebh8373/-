@@ -4,11 +4,12 @@ import numpy as np
 import calculations as calc
 from datetime import datetime
 import importlib
+import os
 
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.4.1" # Mass Effect & Hardness Report Patch
+__version__ = "6.5.0" # Prediction Mass Effect, Hardness & Measured Data Learning Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -17,8 +18,95 @@ try:
 except ImportError:
     IS_PLOTLY_AVAILABLE = False
 
+# [MEASURED DATA / EMPIRICAL CALIBRATION]
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+MEASURED_DB_PATH = os.path.join(DATA_DIR, "measured_property_database.csv")
+PROP_KEYS = ["ys", "ts", "el", "ra", "cvn", "hb"]
+ELEMENT_LIST = ['C','Si','Mn','P','S','Cr','Mo','Ni','Cu','V','Nb','Ti','Al','B','N','As','Sn','Sb','Pb','Zr']
+
+def _measured_columns():
+    base = ["timestamp", "heat_no", "material_grade", "product_name", "section_type",
+            "thickness_mm", "coupon_thickness_mm", "test_temp_c",
+            "p0_type", "p0_temp", "p0_time_min", "p0_cooling",
+            "p1_type", "p1_temp", "p1_time_min", "p1_cooling",
+            "p2_type", "p2_temp", "p2_time_min", "p2_cooling",
+            "p3_type", "p3_temp", "p3_time_min", "p3_cooling"]
+    comp_cols = [f"comp_{e}" for e in ELEMENT_LIST]
+    prop_cols = [f"actual_{k}" for k in PROP_KEYS] + [f"pred_{k}" for k in PROP_KEYS] + [f"residual_{k}" for k in PROP_KEYS]
+    return base + comp_cols + prop_cols + ["ceq_iiw", "pcm", "micro_name", "note"]
+
+def load_measured_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    cols = _measured_columns()
+    if not os.path.exists(MEASURED_DB_PATH):
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(MEASURED_DB_PATH)
+    for col in cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df[cols]
+
+def save_measured_db(df):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df.to_csv(MEASURED_DB_PATH, index=False, encoding="utf-8-sig")
+
+def apply_empirical_calibration(report, comp, thickness, enabled=True):
+    if not enabled:
+        return report, {"n": 0, "message": "실측 보정 미적용"}
+    df = load_measured_db()
+    if df.empty or len(df.dropna(subset=["residual_ts", "residual_ys"], how="all")) < 3:
+        return report, {"n": 0, "message": "실측 데이터 3건 이상 누적 시 자동 보정 적용"}
+    work = df.copy()
+    for col in ["thickness_mm", "ceq_iiw", "pcm"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    eq = calc.calculate_all_equivalents(comp)
+    thick = float(thickness)
+    ceq = float(eq.get("ceq_iiw", 0) or 0)
+    pcm = float(eq.get("pcm", 0) or 0)
+    dist = (abs(work["thickness_mm"] - thick) / 350.0).fillna(1.5) + (abs(work["ceq_iiw"] - ceq) / 0.18).fillna(1.5) + (abs(work["pcm"] - pcm) / 0.08).fillna(1.0)
+    weight = 1.0 / (1.0 + dist)
+    calibrated = report.copy()
+    offsets = {}
+    used = 0
+    for k in PROP_KEYS:
+        rcol = f"residual_{k}"
+        if rcol not in work:
+            continue
+        residuals = pd.to_numeric(work[rcol], errors="coerce")
+        mask = residuals.notna()
+        if int(mask.sum()) >= 3:
+            offset = float((residuals[mask] * weight[mask]).sum() / max(float(weight[mask].sum()), 1e-9))
+            limit = {"ys":60, "ts":70, "el":5, "ra":8, "cvn":25, "hb":25}[k]
+            offset = max(-limit, min(limit, offset))
+            calibrated[k] = round(max(0, float(report[k]) + offset), 1)
+            offsets[k] = round(offset, 2)
+            used = max(used, int(mask.sum()))
+    calibrated["calibration_offsets"] = offsets
+    return calibrated, {"n": used, "message": f"실측 데이터 기반 잔차 보정 적용: {used}건", "offsets": offsets}
+
+def build_measured_record(heat_no, material_grade, product_name, section_type, comp, p0, p1, p2, p3, thickness, coupon_thick, test_temp, actuals, note=""):
+    ts_1st = calc.calculate_1st_stage_physics(comp, p1, thickness)
+    pred = calc.get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=p1, thickness=thickness, p0=p0, ceq_standard=ceq_std)
+    eq = calc.calculate_all_equivalents(comp)
+    row = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "heat_no": heat_no, "material_grade": material_grade,
+           "product_name": product_name, "section_type": section_type, "thickness_mm": thickness, "coupon_thickness_mm": coupon_thick, "test_temp_c": test_temp,
+           "p0_type": p0.get("type"), "p0_temp": p0.get("temp"), "p0_time_min": p0.get("time"), "p0_cooling": p0.get("cooling"),
+           "p1_type": p1.get("type"), "p1_temp": p1.get("temp"), "p1_time_min": p1.get("time"), "p1_cooling": p1.get("cooling"),
+           "p2_type": p2.get("type"), "p2_temp": p2.get("temp"), "p2_time_min": p2.get("time"), "p2_cooling": p2.get("cooling"),
+           "p3_type": p3.get("type"), "p3_temp": p3.get("temp"), "p3_time_min": p3.get("time"), "p3_cooling": p3.get("cooling"),
+           "ceq_iiw": eq.get("ceq_iiw"), "pcm": eq.get("pcm"), "micro_name": pred.get("micro_name"), "note": note}
+    for e in ELEMENT_LIST:
+        row[f"comp_{e}"] = float(comp.get(e, 0) or 0)
+    for k in PROP_KEYS:
+        a = actuals.get(k, np.nan)
+        row[f"actual_{k}"] = a
+        row[f"pred_{k}"] = pred.get(k, np.nan)
+        row[f"residual_{k}"] = (float(a) - float(pred.get(k, 0))) if pd.notna(a) else np.nan
+    return row
+
+
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.4.1", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.5.0", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -30,7 +118,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.4.1: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.5.0: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
 
 # [SIDEBAR - GLOBAL PARAMETERS]
 with st.sidebar:
@@ -41,12 +129,13 @@ with st.sidebar:
     c_col1, c_col2 = st.columns(2)
     ceq_std = c_col1.selectbox("Ceq 규격", ["IIW (ASTM/ASME/EN)", "JIS", "CET (European)"])
     pcm_std = c_col2.selectbox("Pcm 규격", ["Pcm (Ito-Bessyo)", "None"])
+    use_measured_calibration = st.checkbox("실측 데이터 기반 보정 적용", value=True)
     st.divider()
     st.info("Pusan National Univ. Metal Materials Lab\nQuality Management Specialist System")
     st.caption(f"Build Date: {datetime.now().strftime('%Y-%m-%d')}")
 
 # [MAIN TABS INTERFACE]
-tab_predict, tab_inverse = st.tabs(["🚀 정밀 물성 예측 시뮬레이션", "🔄 전문가용 역설계 엔진 (Inverse)"])
+tab_predict, tab_inverse, tab_measured = st.tabs(["🚀 정밀 물성 예측 시뮬레이션", "🔄 전문가용 역설계 엔진 (Inverse)", "📚 실측 데이터 누적/보정"])
 
 # --- TAB 1: 물성 예측 ---
 with tab_predict:
@@ -56,7 +145,7 @@ with tab_predict:
     user_composition = {}
     col_row1 = st.columns(5); col_row2 = st.columns(5); col_row3 = st.columns(5); col_row4 = st.columns(5)
     
-    element_list = ['C','Si','Mn','P','S','Cr','Mo','Ni','Cu','V','Nb','Ti','Al','B','N','As','Sn','Sb','Pb','Zr']
+    element_list = ELEMENT_LIST
     
     for idx, element_name in enumerate(element_list):
         current_row = [col_row1, col_row2, col_row3, col_row4][idx // 5]
@@ -142,6 +231,10 @@ with tab_predict:
                 ceq_standard=ceq_std,
                 p0={'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool}
             )
+            final_report_raw = final_report.copy()
+            coupon_report_raw = coupon_report.copy()
+            final_report, calibration_info = apply_empirical_calibration(final_report, user_composition, input_thickness, use_measured_calibration)
+            coupon_report, coupon_calibration_info = apply_empirical_calibration(coupon_report, user_composition, input_coupon_thick, use_measured_calibration)
         except TypeError as e:
             st.error(f"⚠️ 시뮬레이션 엔진 호출 오류 (TypeError): {e}")
             st.info("임시 해결책: 페이지를 새로고침(F5)하거나 관리자에게 문의하세요.")
@@ -151,6 +244,8 @@ with tab_predict:
             st.stop()
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
+        if use_measured_calibration:
+            st.caption(f"📚 {calibration_info.get('message', '')}")
         st.info("💡 **질량 효과(Mass Effect)에 의한 제품 본체와 시험편의 물성 차이 비교**")
         
         rep_col1, rep_col2 = st.columns(2)
@@ -210,30 +305,71 @@ with tab_predict:
         st.subheader("🔍 두께별 물성 민감도 분석 (Mass Effect Analysis)")
         st.write("현재 성분 및 열처리 조건에서 두께 변화에 따른 강도 저하 추이를 시뮬레이션합니다.")
         
-        thickness_range = np.linspace(10, 1000, 50)
+        thickness_range = np.linspace(10, max(1000, input_thickness*2), 60)
         sim_results = []
+        p0_current = {'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool}
+        p1_current = {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}
+        p2_current = {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool}
+        p3_current = {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool}
         for t in thickness_range:
-            ts_1st = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, t)
-            rep = calc.get_final_expert_simulation(ts_1st, {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool}, {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool}, input_test_temp, user_composition, p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, thickness=t, ceq_standard=ceq_std, p0={'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool})
-            sim_results.append({'Thickness': t, 'YS': rep['ys'], 'TS': rep['ts']})
-        
+            ts_1st = calc.calculate_1st_stage_physics(user_composition, p1_current, t)
+            rep = calc.get_final_expert_simulation(ts_1st, p2_current, p3_current, input_test_temp, user_composition, p1=p1_current, thickness=t, ceq_standard=ceq_std, p0=p0_current)
+            rep, _ = apply_empirical_calibration(rep, user_composition, t, use_measured_calibration)
+            sim_results.append({'Thickness': round(float(t), 1), 'YS': rep['ys'], 'TS': rep['ts'], 'EL': rep['el'], 'RA': rep['ra'], 'CVN': rep['cvn'], 'HB': rep['hb']})
+
         sim_df = pd.DataFrame(sim_results)
-        
+
+        def pred_mass_point(section_thickness, label):
+            ts_1st = calc.calculate_1st_stage_physics(user_composition, p1_current, section_thickness)
+            rep = calc.get_final_expert_simulation(ts_1st, p2_current, p3_current, input_test_temp, user_composition, p1=p1_current, thickness=section_thickness, ceq_standard=ceq_std, p0=p0_current)
+            rep, _ = apply_empirical_calibration(rep, user_composition, section_thickness, use_measured_calibration)
+            return {'구분': label, '두께(mm)': section_thickness, 'YS(MPa)': rep['ys'], 'TS(MPa)': rep['ts'], 'EL(%)': rep['el'], 'RA(%)': rep['ra'], 'CVN(J)': rep['cvn'], 'HB': rep['hb']}
+
+        pred_mass_summary_df = pd.DataFrame([
+            pred_mass_point(input_coupon_thick, '시험편 Coupon'),
+            pred_mass_point(input_thickness, '제품 본체 Core'),
+            pred_mass_point(max(1000, input_thickness*2), '검토 최대 두께')
+        ])
+        st.write("#### 📌 두께 기준별 예측 물성 요약")
+        st.dataframe(pred_mass_summary_df, use_container_width=True, hide_index=True)
+
+        coupon_row = pred_mass_summary_df.iloc[0]
+        core_row = pred_mass_summary_df.iloc[1]
+        delta_cols = st.columns(6)
+        delta_cols[0].metric("YS 변화", f"{core_row['YS(MPa)'] - coupon_row['YS(MPa)']:.1f} MPa")
+        delta_cols[1].metric("TS 변화", f"{core_row['TS(MPa)'] - coupon_row['TS(MPa)']:.1f} MPa")
+        delta_cols[2].metric("EL 변화", f"{core_row['EL(%)'] - coupon_row['EL(%)']:.1f} %")
+        delta_cols[3].metric("RA 변화", f"{core_row['RA(%)'] - coupon_row['RA(%)']:.1f} %")
+        delta_cols[4].metric("CVN 변화", f"{core_row['CVN(J)'] - coupon_row['CVN(J)']:.1f} J")
+        delta_cols[5].metric("HB 변화", f"{core_row['HB'] - coupon_row['HB']:.1f} HB")
+
         if IS_PLOTLY_AVAILABLE:
-            fig_sens = go.Figure()
-            fig_sens.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['TS'], name='인장강도 (TS)', line=dict(color='#ef4444', width=3)))
-            fig_sens.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['YS'], name='항복강도 (YS)', line=dict(color='#3b82f6', width=3, dash='dash')))
-            fig_sens.update_layout(
-                title="두께 증가에 따른 강도 저하 시뮬레이션",
-                xaxis_title="두께 (mm)", yaxis_title="강도 (MPa)",
-                hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            # 현재 두께 위치 표시
-            fig_sens.add_vline(x=input_thickness, line_dash="dot", line_color="green", annotation_text=f"현재 설정: {input_thickness}mm")
-            st.plotly_chart(fig_sens, use_container_width=True)
+            strength_tab, ductility_tab, toughness_tab = st.tabs(["강도/경도", "연성", "충격치"])
+            with strength_tab:
+                fig_sens = go.Figure()
+                fig_sens.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['TS'], name='인장강도 (TS)', line=dict(color='#ef4444', width=3)))
+                fig_sens.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['YS'], name='항복강도 (YS)', line=dict(color='#3b82f6', width=3, dash='dash')))
+                fig_sens.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['HB'], name='브리넬 경도 (HB)', yaxis='y2', line=dict(color='#f59e0b', width=3, dash='dot')))
+                fig_sens.update_layout(title="두께 증가에 따른 강도/경도 변화", xaxis_title="두께 (mm)", yaxis_title="강도 (MPa)", yaxis2=dict(title="경도 (HB)", overlaying='y', side='right'), hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                fig_sens.add_vline(x=input_thickness, line_dash="dot", line_color="green", annotation_text=f"현재 설정: {input_thickness}mm")
+                fig_sens.add_vline(x=input_coupon_thick, line_dash="dash", line_color="gray", annotation_text=f"Coupon: {input_coupon_thick}mm")
+                st.plotly_chart(fig_sens, use_container_width=True)
+            with ductility_tab:
+                fig_duct = go.Figure()
+                fig_duct.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['EL'], name='연신율 (EL)', line=dict(width=3)))
+                fig_duct.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['RA'], name='단면수축률 (RA)', line=dict(width=3, dash='dash')))
+                fig_duct.update_layout(title="두께별 연성 변화", xaxis_title="두께 (mm)", yaxis_title="연성 (%)", hovermode="x unified")
+                fig_duct.add_vline(x=input_thickness, line_dash="dot", line_color="green", annotation_text=f"현재 설정: {input_thickness}mm")
+                st.plotly_chart(fig_duct, use_container_width=True)
+            with toughness_tab:
+                fig_cvn = go.Figure()
+                fig_cvn.add_trace(go.Scatter(x=sim_df['Thickness'], y=sim_df['CVN'], name='충격치 (CVN)', line=dict(width=3)))
+                fig_cvn.update_layout(title="두께별 CVN 민감도", xaxis_title="두께 (mm)", yaxis_title="CVN (J)", hovermode="x unified")
+                fig_cvn.add_vline(x=input_thickness, line_dash="dot", line_color="green", annotation_text=f"현재 설정: {input_thickness}mm")
+                st.plotly_chart(fig_cvn, use_container_width=True)
         else:
-            st.line_chart(sim_df.set_index('Thickness'))
-        
+            st.line_chart(sim_df.set_index('Thickness')[['TS', 'YS', 'HB', 'CVN', 'EL', 'RA']])
+
         st.info("💡 **전문가 팁**: 그래프의 기울기가 급격히 변하는 지점이 해당 합금의 유효 경화 깊이 한계입니다. 대형재의 경우 Mo, Cr 함량을 높여 그래프를 완만하게 만들어야 합니다.")
 
 # --- TAB 2: 역설계 엔진 ---
@@ -422,3 +558,117 @@ with tab_inverse:
             st.line_chart(inv_sim_df.set_index('Thickness')[['TS', 'YS', 'HB', 'CVN', 'EL', 'RA']])
 
         st.warning("⚠️ 두께 증가 시 TS/YS/HB 저하가 크거나 CVN이 급격히 낮아지는 구간은 경화능 부족 또는 중심부 냉각속도 부족 가능성이 큰 영역입니다. 실제 양산 전에는 제품부착 시험편 또는 대표 단면 시험으로 보정이 필요합니다.")
+
+
+# --- TAB 3: 실측 데이터 누적/보정 ---
+with tab_measured:
+    st.header("📚 실측 데이터 누적 및 예측 보정 엔진")
+    st.write("실제 Heat/MTR/기계시험 결과를 누적하면 예측값과 실측값의 잔차를 계산하여 이후 예측 시뮬레이션에 자동 보정값으로 반영합니다.")
+
+    db_df = load_measured_db()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("누적 실측 데이터", f"{len(db_df)} 건")
+    m2.metric("보정 가능 데이터", f"{len(db_df.dropna(subset=['residual_ts','residual_ys'], how='all')) if not db_df.empty else 0} 건")
+    if not db_df.empty and 'timestamp' in db_df and len(db_df['timestamp'].dropna()) > 0:
+        m3.metric("최종 입력", str(db_df['timestamp'].dropna().iloc[-1]))
+    else:
+        m3.metric("최종 입력", "-")
+
+    st.divider()
+    st.subheader("1️⃣ 실측 데이터 수동 입력")
+    st.caption("MTR 또는 시험성적서의 Heat 성분/열처리/기계적 물성값을 누적하는 DB입니다. 0으로 둔 물성은 미입력값으로 처리됩니다.")
+    meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
+    heat_no = meta_col1.text_input("Heat No.", value="")
+    material_grade = meta_col2.text_input("재질/규격", value="ASTM A352 LCC")
+    product_name = meta_col3.text_input("제품명", value="Casting")
+    section_type = meta_col4.selectbox("시험 위치", ["Coupon", "Product Attached", "Core", "Surface", "Other"])
+
+    st.write("#### 화학성분 입력")
+    comp_input = {}
+    comp_cols = st.columns(5)
+    default_comp = {'C':0.185, 'Si':0.45, 'Mn':1.45, 'P':0.010, 'S':0.005, 'Ni':0.35, 'Cr':0.25, 'Mo':0.08}
+    for idx, e in enumerate(ELEMENT_LIST):
+        comp_input[e] = comp_cols[idx % 5].number_input(f"실측 {e}(%)", min_value=0.0, max_value=10.0, value=float(default_comp.get(e, 0.0)), format="%.4f", key=f"actual_comp_{e}")
+
+    st.write("#### 열처리 조건")
+    hp0, hp1, hp2, hp3 = st.columns(4)
+    with hp0:
+        a_p0_type = st.selectbox("예비 공정", ["None", "Normalizing", "Homogenizing", "Annealing"], key="actual_p0_type")
+        a_p0_temp = st.number_input("예비 온도(℃)", 0, 1200, 950, key="actual_p0_temp")
+        a_p0_time = st.number_input("예비 시간(min)", 0, 10000, 240, key="actual_p0_time")
+        a_p0_cool = st.selectbox("예비 냉각", ["공냉(AC)", "노냉(FC)"], key="actual_p0_cool")
+    with hp1:
+        a_p1_type = st.selectbox("1차 공정", ["Quenching", "Normalizing", "Annealing"], key="actual_p1_type")
+        a_p1_temp = st.number_input("1차 온도(℃)", 700, 1200, 930, key="actual_p1_temp")
+        a_p1_time = st.number_input("1차 시간(min)", 0, 10000, 360, key="actual_p1_time")
+        a_p1_cool = st.selectbox("1차 냉각", ["수냉(WQ)", "유냉(OQ)", "공냉(AC)"], key="actual_p1_cool")
+    with hp2:
+        a_p2_type = st.selectbox("2차 공정", ["None", "Tempering", "Normalizing", "Annealing"], index=1, key="actual_p2_type")
+        a_p2_temp = st.number_input("2차 온도(℃)", 0, 1200, 610, key="actual_p2_temp")
+        a_p2_time = st.number_input("2차 시간(min)", 0, 10000, 240, key="actual_p2_time")
+        a_p2_cool = st.selectbox("2차 냉각", ["공냉(AC)", "노냉(FC)", "수냉(WQ)"], key="actual_p2_cool")
+    with hp3:
+        a_p3_type = st.selectbox("3차 공정", ["None", "S/R", "PWHT"], index=1, key="actual_p3_type")
+        a_p3_temp = st.number_input("3차 온도(℃)", 0, 850, 625, key="actual_p3_temp")
+        a_p3_time = st.number_input("3차 시간(min)", 0, 10000, 300, key="actual_p3_time")
+        a_p3_cool = st.selectbox("3차 냉각", ["노냉(FC)", "공냉(AC)"], key="actual_p3_cool")
+
+    st.write("#### 실측 기계적 물성")
+    ap1, ap2, ap3, ap4 = st.columns(4)
+    actual_thickness = ap1.number_input("실측 위치 두께(mm)", 10, 2500, input_thickness, key="actual_thickness")
+    actual_coupon_thick = ap2.number_input("Coupon 두께(mm)", 10, 2500, input_coupon_thick, key="actual_coupon_thick")
+    actual_test_temp = ap3.number_input("충격 시험 온도(℃)", -196, 200, input_test_temp, key="actual_test_temp")
+    note = ap4.text_input("비고", value="")
+    prop_cols = st.columns(6)
+    actuals = {
+        'ys': prop_cols[0].number_input("실측 YS(MPa)", 0.0, 2000.0, 0.0, key="actual_ys"),
+        'ts': prop_cols[1].number_input("실측 TS(MPa)", 0.0, 2500.0, 0.0, key="actual_ts"),
+        'el': prop_cols[2].number_input("실측 EL(%)", 0.0, 100.0, 0.0, key="actual_el"),
+        'ra': prop_cols[3].number_input("실측 RA(%)", 0.0, 100.0, 0.0, key="actual_ra"),
+        'cvn': prop_cols[4].number_input("실측 CVN(J)", 0.0, 500.0, 0.0, key="actual_cvn"),
+        'hb': prop_cols[5].number_input("실측 HB", 0.0, 700.0, 0.0, key="actual_hb"),
+    }
+    actuals = {k: (np.nan if v == 0 else v) for k, v in actuals.items()}
+
+    if st.button("➕ 실측 데이터 저장 및 보정 DB 반영", use_container_width=True):
+        p0_m = {'type': a_p0_type, 'temp': a_p0_temp, 'time': a_p0_time, 'cooling': a_p0_cool}
+        p1_m = {'type': a_p1_type, 'temp': a_p1_temp, 'time': a_p1_time, 'cooling': a_p1_cool}
+        p2_m = {'type': a_p2_type, 'temp': a_p2_temp, 'time': a_p2_time, 'cooling': a_p2_cool}
+        p3_m = {'type': a_p3_type, 'temp': a_p3_temp, 'time': a_p3_time, 'cooling': a_p3_cool}
+        row = build_measured_record(heat_no, material_grade, product_name, section_type, comp_input, p0_m, p1_m, p2_m, p3_m, actual_thickness, actual_coupon_thick, actual_test_temp, actuals, note)
+        db_df = pd.concat([load_measured_db(), pd.DataFrame([row])], ignore_index=True)
+        save_measured_db(db_df)
+        st.success("실측 데이터가 저장되었고, 다음 예측부터 보정 후보 데이터로 사용됩니다.")
+
+    st.divider()
+    st.subheader("2️⃣ CSV 업로드 / 다운로드 / 누적 데이터 관리")
+    st.caption("동일 컬럼 구조의 CSV를 업로드하면 기존 DB에 누적됩니다. MTR/시험성적서 데이터를 엑셀에서 정리한 뒤 CSV로 저장하여 업로드할 수 있습니다.")
+    uploaded_csv = st.file_uploader("실측 데이터 CSV 업로드", type=["csv"])
+    if uploaded_csv is not None:
+        try:
+            up_df = pd.read_csv(uploaded_csv)
+            current = load_measured_db()
+            for col in _measured_columns():
+                if col not in up_df.columns:
+                    up_df[col] = np.nan
+            merged = pd.concat([current, up_df[_measured_columns()]], ignore_index=True)
+            save_measured_db(merged)
+            st.success(f"CSV {len(up_df)}건을 누적 DB에 반영했습니다.")
+        except Exception as e:
+            st.error(f"CSV 업로드 오류: {e}")
+
+    db_df = load_measured_db()
+    if not db_df.empty:
+        st.dataframe(db_df.tail(100), use_container_width=True, hide_index=True)
+        st.download_button("⬇️ 누적 실측 DB 다운로드", db_df.to_csv(index=False, encoding="utf-8-sig"), file_name="measured_property_database.csv", mime="text/csv", use_container_width=True)
+        if st.button("🧹 누적 DB 초기화", type="secondary"):
+            save_measured_db(pd.DataFrame(columns=_measured_columns()))
+            st.warning("누적 실측 DB를 초기화했습니다. 페이지를 새로고침하면 반영됩니다.")
+    else:
+        st.info("아직 누적된 실측 데이터가 없습니다.")
+
+    st.divider()
+    st.subheader("3️⃣ 보정 방식 설명")
+    st.write("- 실측 저장 시 현재 엔진 예측값과 실측값의 차이, 즉 `actual - predicted` 잔차를 함께 저장합니다.")
+    st.write("- 예측 시뮬레이션에서는 두께, Ceq, Pcm이 유사한 누적 데이터에 더 높은 가중치를 부여하여 YS/TS/EL/RA/CVN/HB를 보정합니다.")
+    st.warning("주의: 데이터가 적을 때는 보정 신뢰도가 낮습니다. 최소 3건 이상부터 보정이 적용되며, 동일 재질·동일 열처리·유사 두께 데이터가 많을수록 정확도가 높아집니다.")
