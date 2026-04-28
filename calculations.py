@@ -207,6 +207,15 @@ def run_expert_inverse_engine(targets, **kwargs):
     if ceq_val > 0.48:
         comments.append(f"주의: 제안된 성분의 {ceq_label} 값({ceq_val})이 높아 예열 및 후열처리가 필수적입니다.")
 
+    # Pcm(Ito-Bessyo) 용접성 평가 의견 추가
+    pcm_val = calculate_all_equivalents(alloy)['pcm']
+    if pcm_val > 0.25:
+        comments.append(f"용접성 경고: Pcm 값이 {pcm_val}로 매우 높습니다. 저온 균열 방지를 위해 100℃ 이상의 철저한 예열과 저수소계 용접봉 사용이 필수적입니다.")
+    elif pcm_val > 0.20:
+        comments.append(f"용접 조언: Pcm 값이 {pcm_val}입니다. 구속이 크거나 두꺼운 단면 용접 시 50~100℃ 수준의 예열이 권장됩니다.")
+    else:
+        comments.append(f"용접성 우수: Pcm 값이 {pcm_val}로 낮아 일반적인 조건에서 예열 없이도 우수한 용접성을 확보할 수 있습니다.")
+
     # 역설계 조건에 대한 미세조직 예측
     p1_dict = {"type": "Quenching" if t_ys > 450 else "Normalizing", "cooling": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"}
     micro_name, micro_desc = predict_microstructure(alloy, p1_dict, thick)
