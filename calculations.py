@@ -105,7 +105,7 @@ def predict_microstructure(comp, p1, thickness, **kwargs):
         return "Ferrite + Coarse Pearlite (F+P)", "매우 완만한 냉각으로 인해 조대한 펄라이트와 페라이트가 형성되었습니다."
 
 # [SECTION 2] 최종 물성 시뮬레이션
-def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickness=150, ceq_standard="IIW (ASTM/ASME/EN)", **kwargs):
+def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickness=150, ceq_standard="IIW (ASTM/ASME/EN)", p0=None, **kwargs):
     def calc_hjp(t, m, mode):
         if mode == "None" or m <= 0: return 0.0
         val = (t + 273.15) * (20 + math.log10(max(0.1, m / 60)))
@@ -125,10 +125,18 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickn
     else: yr = 0.725
     f_ys = f_ts * yr
 
+    # 예비 열처리(p0) 적용 여부에 따른 연성/인성 향상 효과
+    p0_el_boost = 1.0
+    p0_cvn_boost = 1.0
+    p0_mode = p0.get('type', p0.get('mode', 'None')) if p0 else "None"
+    if p0_mode != "None":
+        p0_el_boost = 1.08  # 예비열처리 시 연성 8% 향상 (조직 미세화)
+        p0_cvn_boost = 1.15 # 예비열처리 시 인성 15% 향상
+
     # 주강품(Cast Steel) 특성을 반영한 연성 및 인성 예측식 보정 (미세 기공 및 결함 민감도 반영)
     base_el = 22.5 * (600 / max(400, f_ts))**0.8
     tempering_el_gain = (l2 + l3) * 15.0
-    f_el = base_el + tempering_el_gain
+    f_el = (base_el + tempering_el_gain) * p0_el_boost
     
     ra_factor = 2.0 - (f_ts / 2000)
     f_ra = f_el * ra_factor 
@@ -140,7 +148,7 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickn
     # 주강품 특성 반영: upper shelf energy 하향 조정 
     upper = 180.0 + (ni*85.0) - (p*1600.0) - (comp.get('S', 0)*3000.0)
     penalty = 0.55 if (p2['cooling'] == "노냉(FC)" or p3['cooling'] == "노냉(FC)") else 1.0
-    f_cvn = (5.0 + (max(10.0, upper) - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty
+    f_cvn = ((5.0 + (max(10.0, upper) - 5.0) / (1 + math.exp(-0.135 * (test_temp - dbtt)))) * penalty) * p0_cvn_boost
     
     ceq_label, ceq_val = calculate_ceq_by_standard(comp, ceq_standard)
     ceq_all = calculate_all_equivalents(comp)
@@ -166,6 +174,7 @@ def run_expert_inverse_engine(targets, **kwargs):
     t_ys, t_ts, t_cvn = targets['ys'], targets['ts'], targets['cvn']
     t_el, t_ra, t_hb = targets.get('el', 20), targets.get('ra', 45), targets.get('hb', 210)
     t_temp, thick = targets['test_temp'], targets['thick']
+    coupon_thick = targets.get('coupon_thick', 50)
     t_ceq_standard = targets.get('ceq_standard', 'IIW (ASTM/ASME/EN)')
     
     comments = []
@@ -178,9 +187,6 @@ def run_expert_inverse_engine(targets, **kwargs):
         req_mn = 1.65
         comments.append(f"두께({thick}mm) 질량 효과 극복을 위해 Mo, Cr 경화능 원소를 증량 설계하였습니다.")
     
-    strength_from_alloys = (req_mo * 330) + (req_cr * 142) + (req_mn * 205)
-    req_c = max(0.10, (design_strength / (1.2 * 0.9) - 380 - strength_from_alloys) / 1545)
-    
     tempering_temp_offset = 0
     if t_el > 23.0 or t_ra > 52.0:
         tempering_temp_offset = 40
@@ -192,7 +198,7 @@ def run_expert_inverse_engine(targets, **kwargs):
     if req_ni > 1.0: comments.append(f"저온 충격치({t_cvn}J) 확보를 위해 Ni 함량을 {round(req_ni,2)}%로 제안합니다.")
         
     alloy = {
-        "C":round(req_c,3), "Si":0.45, "Mn":round(req_mn,2), "P":0.008, "S":0.002, 
+        "C": 0.20, "Si":0.45, "Mn":round(req_mn,2), "P":0.008, "S":0.002, 
         "Cr":round(req_cr,2), "Mo":round(req_mo,2), "Ni":round(req_ni,2), "Cu":0.15, 
         "V":0.05 if design_strength > 750 else 0.01, "Nb":0.03, "Ti":0.015, "Al":0.04, 
         "B":0.001, "N":0.008, "As":0.004, "Sn":0.004, "Sb":0.002, "Pb":0.001, "Zr":0.005
@@ -202,6 +208,52 @@ def run_expert_inverse_engine(targets, **kwargs):
     predicted_p1_temp = 905 + (req_cr * 12) + (req_mo * 15) + (thick / 15)
     predicted_p1_temp = min(1100, max(880, round(predicted_p1_temp / 5) * 5))
     comments.append(f"추천 1차 오스테나이트화 온도: {predicted_p1_temp}℃ (합금 성분 및 두께 영향 반영)")
+
+    # 예비 열처리 자동 추천 (두께가 두껍거나 충격치 요구가 높을 경우)
+    p0 = {"mode": "None", "temp": 0, "time": 0, "cool": "공냉(AC)"}
+    if thick >= 250 or t_cvn >= 80:
+        p0 = {"mode": "Normalizing", "temp": predicted_p1_temp + 30, "time": max(300, thick * 3.0), "cool": "공냉(AC)"}
+        comments.append(f"조직 미세화 및 물성 확보를 위해 예비 열처리({p0['mode']}) 공정을 설계에 반영하였습니다.")
+
+    # 정밀 예측 엔진을 활용한 탄소량(C) 이분 탐색 알고리즘 (예측/역설계 오차 근본적 해결)
+    p1_dict = {"type": "Quenching" if t_ys > 450 else "Normalizing", "cooling": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"}
+    p1 = {"type": p1_dict["type"], "temp": predicted_p1_temp, "time": max(360, thick * 3.5), "cooling": p1_dict["cooling"]}
+    p2 = {"type": "Tempering", "temp": 600 + tempering_temp_offset, "time": max(240, thick * 1.5), "cooling": "공냉(AC)"}
+    p3 = {"type": "S/R", "temp": 620, "time": 300, "cooling": "노냉(FC)"}
+
+    # 1. 시험편(Coupon) 기준 물성 만족을 위한 배합 탐색
+    low_c, high_c = 0.05, 0.85
+    best_c = 0.20
+    coupon_alloy = alloy.copy()
+    for _ in range(15):
+        mid_c = (low_c + high_c) / 2
+        coupon_alloy["C"] = mid_c
+        ts_1st = calculate_1st_stage_physics(coupon_alloy, p1, coupon_thick)
+        sim = get_final_expert_simulation(ts_1st, p2, p3, t_temp, coupon_alloy, p1, coupon_thick, p0=p0)
+        if sim["ts"] < t_ts:
+            low_c = mid_c
+        else:
+            high_c = mid_c
+        best_c = mid_c
+    coupon_alloy["C"] = round(max(0.10, best_c), 2)
+
+    # 2. 제품 본체(Core) 기준 물성 만족을 위한 배합 탐색
+    low_c, high_c = 0.05, 0.85
+    best_c = 0.20
+    prod_alloy = alloy.copy()
+    for _ in range(15):
+        mid_c = (low_c + high_c) / 2
+        prod_alloy["C"] = mid_c
+        ts_1st = calculate_1st_stage_physics(prod_alloy, p1, thick)
+        sim = get_final_expert_simulation(ts_1st, p2, p3, t_temp, prod_alloy, p1, thick, p0=p0)
+        if sim["ts"] < t_ts:
+            low_c = mid_c
+        else:
+            high_c = mid_c
+        best_c = mid_c
+    prod_alloy["C"] = round(max(0.10, best_c), 2)
+    
+    alloy = coupon_alloy
 
     ceq_label, ceq_val = calculate_ceq_by_standard(alloy, t_ceq_standard)
     if ceq_val > 0.48:
@@ -217,18 +269,34 @@ def run_expert_inverse_engine(targets, **kwargs):
         comments.append(f"용접성 우수: Pcm 값이 {pcm_val}로 낮아 일반적인 조건에서 예열 없이도 우수한 용접성을 확보할 수 있습니다.")
 
     # 역설계 조건에 대한 미세조직 예측
-    p1_dict = {"type": "Quenching" if t_ys > 450 else "Normalizing", "cooling": "수냉(WQ)" if t_ys > 460 else "공냉(AC)"}
     micro_name, micro_desc = predict_microstructure(alloy, p1_dict, thick)
+
+    # 시편 및 실제 제품 물성 예측
+    ts_1st_coupon = calculate_1st_stage_physics(alloy, p1, coupon_thick)
+    coupon_rep = get_final_expert_simulation(ts_1st_coupon, p2, p3, t_temp, alloy, p1, coupon_thick, p0=p0)
+    
+    ts_1st_prod = calculate_1st_stage_physics(alloy, p1, thick)
+    prod_rep = get_final_expert_simulation(ts_1st_prod, p2, p3, t_temp, alloy, p1, thick, p0=p0)
+
+    # Convert to standard return format
+    ret_p1 = {"mode": p1["type"], "temp": p1["temp"], "time": p1["time"], "cool": p1["cooling"]}
+    ret_p2 = {"mode": p2["type"], "temp": p2["temp"], "time": p2["time"], "cool": p2["cooling"]}
+    ret_p3 = {"mode": p3["type"], "temp": p3["temp"], "time": p3["time"], "cool": p3["cooling"]}
 
     return {
         "alloy": alloy,
-        "p1": {"mode": p1_dict["type"], "temp": predicted_p1_temp, "time": max(360, thick * 3.5), "cool": p1_dict["cooling"]},
-        "p2": {"mode": "Tempering", "temp": 600 + tempering_temp_offset, "time": max(240, thick * 1.5), "cool": "수냉(WQ)" if t_cvn > 60 else "공냉(AC)"},
-        "p3": {"mode": "S/R", "temp": 620, "time": 300, "cool": "공냉(AC)"},
+        "alloy_coupon": coupon_alloy,
+        "alloy_prod": prod_alloy,
+        "p0": p0,
+        "p1": ret_p1,
+        "p2": ret_p2,
+        "p3": ret_p3,
         "comments": comments,
         "ceq_val": ceq_val, "ceq_label": ceq_label,
         "ceq_all": calculate_all_equivalents(alloy),
-        "micro_name": micro_name, "micro_desc": micro_desc
+        "micro_name": micro_name, "micro_desc": micro_desc,
+        "coupon_rep": coupon_rep,
+        "prod_rep": prod_rep
     }
 
 # Backward Compatibility Alias

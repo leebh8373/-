@@ -36,6 +36,7 @@ st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.0: 전문가용 전
 with st.sidebar:
     st.header("⚙️ 기초 공정 변수 설정")
     input_thickness = st.number_input("주물 단면 두께 (mm)", min_value=10, max_value=2500, value=150, step=10)
+    input_coupon_thick = st.number_input("시험편(Coupon) 두께 (mm)", min_value=10, max_value=2500, value=50, step=10)
     input_test_temp = st.selectbox("충격 시험 온도 (℃)", [20, 0, -20, -46, -60, -101], index=3)
     c_col1, c_col2 = st.columns(2)
     ceq_std = c_col1.selectbox("Ceq 규격", ["IIW (ASTM/ASME/EN)", "JIS", "CET (European)"])
@@ -67,12 +68,23 @@ with tab_predict:
     st.divider()
     st.header("2️⃣ 단계별 복합 열처리 시나리오 (1st ~ 3rd Stage)")
     
-    c1, c2, c3 = st.columns(3)
+    c0, c1, c2, c3 = st.columns(4)
     
+    with c0:
+        st.subheader("📦 예비: 조직미세화")
+        p0_type = st.selectbox("공정 종류", ["None", "Normalizing", "Homogenizing", "Annealing"], key="p0_type_select")
+        p0_temp = st.number_input("열처리 온도 (℃)", 0, 1200, 950, step=10, key="p0_temp_input")
+        st.write("가열 유지 시간")
+        t_col1, t_col2 = st.columns(2)
+        p0_h = t_col1.number_input("시간(hr)", 0, 100, 4, key="p0_h")
+        p0_m = t_col2.number_input("분(min)", 0, 59, 0, key="p0_m")
+        p0_time = p0_h * 60 + p0_m
+        p0_cool = st.selectbox("냉각 방식", ["공냉(AC)", "노냉(FC)"], key="p0_cool_select")
+
     with c1:
-        st.subheader("📦 1차: 오스테나이트화")
+        st.subheader("🔥 1차: 오스테나이트화")
         p1_type = st.selectbox("공정 종류", ["Quenching", "Normalizing", "Annealing"], key="p1_type_select")
-        p1_temp = st.number_input("오스테나이트화 온도 (℃)", min_value=700, max_value=1200, value=1050, step=10, key="p1_temp_input")
+        p1_temp = st.number_input("열처리 온도 (℃)", min_value=700, max_value=1200, value=1050, step=10, key="p1_temp_input")
         st.write("가열 유지 시간")
         t_col1, t_col2 = st.columns(2)
         p1_h = t_col1.number_input("시간(hr)", 0, 100, 6, key="p1_h")
@@ -89,7 +101,7 @@ with tab_predict:
         p2_h = t_col1.number_input("시간(hr)", 0, 100, 4, key="p2_h")
         p2_m = t_col2.number_input("분(min)", 0, 59, 0, key="p2_m")
         p2_time = p2_h * 60 + p2_m
-        p2_cool = st.selectbox("냉각 방식", ["수냉(WQ)", "공냉(AC)", "노냉(FC)"], index=1, key="p2_cool_select")
+        p2_cool = st.selectbox("냉각 방식", ["공냉(AC)", "노냉(FC)", "수냉(WQ)"], key="p2_cool_select")
         
     with c3:
         st.subheader("❄️ 3차: 최종 PWHT")
@@ -100,11 +112,13 @@ with tab_predict:
         p3_h = t_col1.number_input("시간(hr)", 0, 100, 5, key="p3_h")
         p3_m = t_col2.number_input("분(min)", 0, 59, 0, key="p3_m")
         p3_time = p3_h * 60 + p3_m
-        p3_cool = st.selectbox("냉각 방식", ["공냉(AC)", "노냉(FC)"], key="p3_cool_select")
+        p3_cool = st.selectbox("냉각 방식", ["노냉(FC)", "공냉(AC)"], key="p3_cool_select")
 
     if st.button("📊 정밀 물성 시뮬레이션 가동", use_container_width=True):
         ts_init = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_thickness)
-        # 최종 물성 시뮬레이션 호출 (v6 캐시 갱신 버전)
+        ts_init_coupon = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, input_coupon_thick)
+        
+        # 최종 물성 시뮬레이션 호출
         try:
             final_report = calc.run_simulation_v6(
                 ts_1st=ts_init, 
@@ -114,7 +128,19 @@ with tab_predict:
                 comp=user_composition,
                 p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
                 thickness=input_thickness,
-                ceq_standard=ceq_std
+                ceq_standard=ceq_std,
+                p0={'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool}
+            )
+            coupon_report = calc.run_simulation_v6(
+                ts_1st=ts_init_coupon, 
+                p2={'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool},
+                p3={'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool},
+                test_temp=input_test_temp, 
+                comp=user_composition,
+                p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool},
+                thickness=input_coupon_thick,
+                ceq_standard=ceq_std,
+                p0={'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool}
             )
         except TypeError as e:
             st.error(f"⚠️ 시뮬레이션 엔진 호출 오류 (TypeError): {e}")
@@ -125,15 +151,26 @@ with tab_predict:
             st.stop()
         
         st.success("### [Sentinel-Alpha 최종 기계적 물성 예측 리포트]")
-        m_cols1 = st.columns(3)
-        m_cols1[0].metric("항복강도 (YS)", f"{final_report['ys']} MPa")
-        m_cols1[1].metric("인장강도 (TS)", f"{final_report['ts']} MPa")
-        m_cols1[2].metric("브리넬 경도 (HB)", f"{final_report['hb']}")
+        st.info("💡 **질량 효과(Mass Effect)에 의한 제품 본체와 시험편의 물성 차이 비교**")
         
-        m_cols2 = st.columns(3)
-        m_cols2[0].metric("연신율 (EL)", f"{final_report['el']} %")
-        m_cols2[1].metric("단면수축률 (RA)", f"{final_report['ra']} %")
-        m_cols2[2].metric("충격치 (CVN)", f"{final_report['cvn']} J")
+        rep_col1, rep_col2 = st.columns(2)
+        with rep_col1:
+            st.subheader(f"🔹 시험편(Coupon) 기준 ({input_coupon_thick}mm)")
+            st.metric("항복강도 (YS)", f"{coupon_report['ys']} MPa")
+            st.metric("인장강도 (TS)", f"{coupon_report['ts']} MPa")
+            st.metric("연신율 (EL)", f"{coupon_report['el']} %")
+            st.metric("단면수축률 (RA)", f"{coupon_report['ra']} %")
+            st.metric("충격치 (CVN)", f"{coupon_report['cvn']} J")
+            st.metric("브리넬 경도 (HB)", f"{coupon_report['hb']}")
+
+        with rep_col2:
+            st.subheader(f"🔸 제품 본체(Core) 기준 ({input_thickness}mm)")
+            st.metric("항복강도 (YS)", f"{final_report['ys']} MPa")
+            st.metric("인장강도 (TS)", f"{final_report['ts']} MPa")
+            st.metric("연신율 (EL)", f"{final_report['el']} %")
+            st.metric("단면수축률 (RA)", f"{final_report['ra']} %")
+            st.metric("충격치 (CVN)", f"{final_report['cvn']} J")
+            st.metric("브리넬 경도 (HB)", f"{final_report['hb']}")
 
         st.divider()
         st.subheader("🧪 탄소당량 분석 (Carbon Equivalent Analysis)")
@@ -177,7 +214,7 @@ with tab_predict:
         sim_results = []
         for t in thickness_range:
             ts_1st = calc.calculate_1st_stage_physics(user_composition, {'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, t)
-            rep = calc.get_final_expert_simulation(ts_1st, {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool}, {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool}, input_test_temp, user_composition)
+            rep = calc.get_final_expert_simulation(ts_1st, {'type':p2_type, 'temp':p2_temp, 'time':p2_time, 'cooling':p2_cool}, {'type':p3_type, 'temp':p3_temp, 'time':p3_time, 'cooling':p3_cool}, input_test_temp, user_composition, p1={'type':p1_type, 'temp':p1_temp, 'time':p1_time, 'cooling':p1_cool}, thickness=t, ceq_standard=ceq_std, p0={'type':p0_type, 'temp':p0_temp, 'time':p0_time, 'cooling':p0_cool})
             sim_results.append({'Thickness': t, 'YS': rep['ys'], 'TS': rep['ts']})
         
         sim_df = pd.DataFrame(sim_results)
@@ -223,7 +260,9 @@ with tab_inverse:
         inverse_results = calc.run_inverse_v6(targets={
             'ys': target_ys, 'ts': target_ts, 'cvn': target_cvn,
             'el': target_el, 'ra': target_ra, 'hb': target_hb,
-            'test_temp': input_test_temp, 'thick': target_thick,
+            'test_temp': input_test_temp, 
+            'thick': target_thick,
+            'coupon_thick': input_coupon_thick,
             'ceq_standard': ceq_std
         })
         
@@ -249,15 +288,50 @@ with tab_inverse:
 
         st.divider()
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
-        st.dataframe(pd.DataFrame([inverse_results['alloy']]), use_container_width=True)
+        st.info("💡 목표 물성을 시험편에 맞출 때와 제품 본체에 맞출 때 필요한 탄소(C) 배합량이 어떻게 다른지 비교합니다.")
+        c_comp1, c_comp2 = st.columns(2)
+        with c_comp1:
+            st.write(f"🔹 **시험편 기준 최소 배합비**")
+            st.dataframe(pd.DataFrame([inverse_results['alloy_coupon']]), use_container_width=True)
+        with c_comp2:
+            st.write(f"🔸 **제품 본체 기준 최소 배합비**")
+            st.dataframe(pd.DataFrame([inverse_results['alloy_prod']]), use_container_width=True)
         
         st.write("#### 2️⃣ 추천 열처리 공정 스케줄")
-        p_list = [inverse_results['p1'], inverse_results['p2'], inverse_results['p3']]
-        for idx, p in enumerate(p_list, 1):
+        p_list = []
+        if inverse_results.get('p0') and inverse_results['p0']['mode'] != "None":
+            p_list.append(("예비", inverse_results['p0']))
+        p_list.extend([("1차", inverse_results['p1']), ("2차", inverse_results['p2']), ("3차", inverse_results['p3'])])
+        
+        for idx_name, p in p_list:
             h_val = int(p['time']) // 60
             m_val = int(p['time']) % 60
             time_str = f"{h_val}시간 {m_val}분" if h_val > 0 else f"{m_val}분"
-            st.info(f"**{idx}차 공정 ({p['mode']})**: {p['temp']}℃ / {time_str} / 냉각: :blue[{p['cool']}]")
+            st.info(f"**{idx_name} 공정 ({p['mode']})**: {p['temp']}℃ / {time_str} / 냉각: :blue[{p['cool']}]")
+
+        st.divider()
+        st.subheader("🔬 역설계 물성 교차 검증 (Cross-Validation)")
+        st.info("💡 목표 물성을 시험편에 맞춰 도출된 합금 및 공정 조건이, 실제 제품 본체 내부에서는 어떻게 달라지는지 비교합니다.")
+        
+        c_rep = inverse_results['coupon_rep']
+        p_rep = inverse_results['prod_rep']
+        
+        vr_col1, vr_col2 = st.columns(2)
+        with vr_col1:
+            st.subheader(f"🔹 시험편 예상 (목표치 매칭) ({input_coupon_thick}mm)")
+            st.metric("항복강도 (YS)", f"{c_rep['ys']} MPa")
+            st.metric("인장강도 (TS)", f"{c_rep['ts']} MPa")
+            st.metric("연신율 (EL)", f"{c_rep['el']} %")
+            st.metric("단면수축률 (RA)", f"{c_rep['ra']} %")
+            st.metric("충격치 (CVN)", f"{c_rep['cvn']} J")
+
+        with vr_col2:
+            st.subheader(f"🔸 제품 본체 코어 예상 ({target_thick}mm)")
+            st.metric("항복강도 (YS)", f"{p_rep['ys']} MPa")
+            st.metric("인장강도 (TS)", f"{p_rep['ts']} MPa")
+            st.metric("연신율 (EL)", f"{p_rep['el']} %")
+            st.metric("단면수축률 (RA)", f"{p_rep['ra']} %")
+            st.metric("충격치 (CVN)", f"{p_rep['cvn']} J")
 
         st.divider()
         st.subheader("🔍 역설계 결과: 두께별 물성 민감도 분석 (Mass Effect Analysis)")
@@ -266,13 +340,14 @@ with tab_inverse:
         thickness_range = np.linspace(10, max(1000, target_thick*2), 50)
         inv_sim_results = []
         inv_alloy = inverse_results['alloy']
+        inv_p0 = {'type': inverse_results['p0']['mode'], 'temp': inverse_results['p0']['temp'], 'time': inverse_results['p0']['time'], 'cooling': inverse_results['p0']['cool']} if inverse_results.get('p0') else None
         inv_p1 = {'type': inverse_results['p1']['mode'], 'temp': inverse_results['p1']['temp'], 'time': inverse_results['p1']['time'], 'cooling': inverse_results['p1']['cool']}
         inv_p2 = {'type': inverse_results['p2']['mode'], 'temp': inverse_results['p2']['temp'], 'time': inverse_results['p2']['time'], 'cooling': inverse_results['p2']['cool']}
         inv_p3 = {'type': inverse_results['p3']['mode'], 'temp': inverse_results['p3']['temp'], 'time': inverse_results['p3']['time'], 'cooling': inverse_results['p3']['cool']}
         
         for t in thickness_range:
             ts_1st = calc.calculate_1st_stage_physics(inv_alloy, inv_p1, t)
-            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy)
+            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy, p1=inv_p1, thickness=t, p0=inv_p0)
             inv_sim_results.append({'Thickness': t, 'YS': rep['ys'], 'TS': rep['ts']})
         
         inv_sim_df = pd.DataFrame(inv_sim_results)
