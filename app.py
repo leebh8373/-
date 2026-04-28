@@ -5,11 +5,13 @@ import calculations as calc
 from datetime import datetime
 import importlib
 import os
+import re
+from io import BytesIO
 
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.5.0" # Prediction Mass Effect, Hardness & Measured Data Learning Patch
+__version__ = "6.6.0" # Excel/PDF Auto Import + Measured Data Learning Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -104,9 +106,235 @@ def build_measured_record(heat_no, material_grade, product_name, section_type, c
         row[f"residual_{k}"] = (float(a) - float(pred.get(k, 0))) if pd.notna(a) else np.nan
     return row
 
+def _safe_float(value, default=np.nan):
+    """문자열/셀 값에서 숫자만 안전하게 추출합니다. 예: '415 MPa' -> 415.0"""
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            txt = value.strip().replace(",", "")
+            if txt in ["", "-", "N/A", "NA", "nan", "None"]:
+                return default
+            m = re.search(r"[-+]?\d*\.?\d+", txt)
+            if not m:
+                return default
+            return float(m.group(0))
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _norm_name(name):
+    return re.sub(r"[^a-z0-9가-힣]+", "", str(name).strip().lower())
+
+
+COLUMN_SYNONYMS = {
+    "heat_no": ["heatno", "heatnumber", "heat", "용해번호", "히트번호", "lotno", "chargeno"],
+    "material_grade": ["material", "grade", "spec", "standard", "재질", "규격", "강종"],
+    "product_name": ["product", "item", "description", "품명", "제품명", "partname"],
+    "section_type": ["section", "location", "testlocation", "position", "시험위치", "채취위치"],
+    "thickness_mm": ["thickness", "thk", "tmm", "sectionthickness", "두께", "두께mm"],
+    "coupon_thickness_mm": ["couponthickness", "coupont", "couponthk", "시험편두께", "coupon두께"],
+    "test_temp_c": ["testtemp", "impacttemp", "cvntemp", "temperature", "시험온도", "충격시험온도"],
+    "actual_ys": ["ys", "yield", "yieldstrength", "yieldstrengthmpa", "yieldmpa", "항복", "항복강도", "rp02"],
+    "actual_ts": ["ts", "uts", "tensile", "tensilestrength", "tensilestrengthmpa", "인장", "인장강도", "rm"],
+    "actual_el": ["el", "elongation", "elong", "a5", "연신율", "연신"],
+    "actual_ra": ["ra", "reductionofarea", "reductionarea", "단면수축", "단면수축률", "z"],
+    "actual_cvn": ["cvn", "impact", "charpy", "charpyv", "absorbedenergy", "impactj", "충격", "충격치", "흡수에너지"],
+    "actual_hb": ["hb", "hbw", "hardness", "brinell", "경도", "브리넬"],
+    "p0_type": ["p0type", "pretype", "예비공정"], "p0_temp": ["p0temp", "pretemp", "예비온도"],
+    "p0_time_min": ["p0time", "pretime", "예비시간"], "p0_cooling": ["p0cooling", "precooling", "예비냉각"],
+    "p1_type": ["p1type", "firsttype", "qtype", "1차공정", "quenchingtype"],
+    "p1_temp": ["p1temp", "austenitizingtemp", "quenchingtemp", "1차온도", "소입온도"],
+    "p1_time_min": ["p1time", "austenitizingtime", "quenchingtime", "1차시간", "소입시간"],
+    "p1_cooling": ["p1cooling", "quenchingcooling", "1차냉각", "소입냉각"],
+    "p2_type": ["p2type", "tempertype", "2차공정", "temperingtype"],
+    "p2_temp": ["p2temp", "temperingtemp", "2차온도", "뜨임온도"],
+    "p2_time_min": ["p2time", "temperingtime", "2차시간", "뜨임시간"],
+    "p2_cooling": ["p2cooling", "temperingcooling", "2차냉각", "뜨임냉각"],
+    "p3_type": ["p3type", "pwhttype", "srtype", "3차공정"],
+    "p3_temp": ["p3temp", "pwhttemp", "srtemp", "3차온도"],
+    "p3_time_min": ["p3time", "pwhttime", "srtime", "3차시간"],
+    "p3_cooling": ["p3cooling", "pwhtcooling", "srcooling", "3차냉각"],
+    "note": ["note", "remark", "remarks", "비고", "메모"],
+}
+for _e in ELEMENT_LIST:
+    COLUMN_SYNONYMS[f"comp_{_e}"] = [_e.lower(), f"{_e.lower()}%", f"comp{_e.lower()}", f"chemical{_e.lower()}", f"성분{_e.lower()}"]
+
+
+def _find_source_col(df, target):
+    normalized = {_norm_name(c): c for c in df.columns}
+    candidates = [_norm_name(target)] + [_norm_name(x) for x in COLUMN_SYNONYMS.get(target, [])]
+    for cand in candidates:
+        if cand in normalized:
+            return normalized[cand]
+    for ncol, original in normalized.items():
+        for cand in candidates:
+            if cand and (cand in ncol or ncol in cand):
+                return original
+    return None
+
+
+def _standardize_import_dataframe(raw_df):
+    """Excel/CSV/PDF 표를 Sentinel 누적 DB 컬럼명으로 표준화합니다."""
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=_measured_columns())
+    df = raw_df.copy().dropna(how="all")
+    if df.empty:
+        return pd.DataFrame(columns=_measured_columns())
+    df.columns = [str(c).strip() for c in df.columns]
+    if set(_measured_columns()).issubset(set(df.columns)):
+        return df[_measured_columns()].copy()
+
+    out = pd.DataFrame(index=df.index)
+    targets = ["heat_no", "material_grade", "product_name", "section_type", "thickness_mm", "coupon_thickness_mm", "test_temp_c",
+               "p0_type", "p0_temp", "p0_time_min", "p0_cooling", "p1_type", "p1_temp", "p1_time_min", "p1_cooling",
+               "p2_type", "p2_temp", "p2_time_min", "p2_cooling", "p3_type", "p3_temp", "p3_time_min", "p3_cooling",
+               "note"] + [f"comp_{e}" for e in ELEMENT_LIST] + [f"actual_{k}" for k in PROP_KEYS]
+    for target in targets:
+        src = _find_source_col(df, target)
+        out[target] = df[src] if src is not None else np.nan
+
+    useful_cols = ["heat_no", "actual_ys", "actual_ts", "actual_cvn", "actual_hb"] + [f"comp_{e}" for e in ["C", "Si", "Mn", "Ni", "Cr", "Mo"]]
+    mask = pd.Series(False, index=out.index)
+    for c in useful_cols:
+        mask = mask | out[c].notna()
+    return out[mask].copy()
+
+
+def parse_excel_or_csv(uploaded_file):
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        return _standardize_import_dataframe(pd.read_csv(uploaded_file))
+    sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl" if name.endswith(".xlsx") else None)
+    parsed = []
+    for sheet_name, sheet_df in sheets.items():
+        std = _standardize_import_dataframe(sheet_df)
+        if not std.empty:
+            std["note"] = std.get("note", "").fillna("").astype(str) + f" | imported_sheet={sheet_name}"
+            parsed.append(std)
+    return pd.concat(parsed, ignore_index=True) if parsed else pd.DataFrame(columns=_measured_columns())
+
+
+def _extract_pdf_text(uploaded_file):
+    data = uploaded_file.read()
+    uploaded_file.seek(0)
+    text = ""
+    try:
+        import pdfplumber
+        with pdfplumber.open(BytesIO(data)) as pdf:
+            for page in pdf.pages:
+                text += "\n" + (page.extract_text() or "")
+    except Exception:
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(data))
+            for page in reader.pages:
+                text += "\n" + (page.extract_text() or "")
+        except Exception:
+            text = ""
+    return text
+
+
+def _extract_pdf_tables(uploaded_file):
+    data = uploaded_file.read()
+    uploaded_file.seek(0)
+    tables = []
+    try:
+        import pdfplumber
+        with pdfplumber.open(BytesIO(data)) as pdf:
+            for page_no, page in enumerate(pdf.pages, start=1):
+                for table in page.extract_tables() or []:
+                    if len(table) >= 2:
+                        header = [str(x).strip() if x is not None else "" for x in table[0]]
+                        df = pd.DataFrame(table[1:], columns=header)
+                        std = _standardize_import_dataframe(df)
+                        if not std.empty:
+                            std["note"] = std.get("note", "").fillna("").astype(str) + f" | imported_pdf_page={page_no}"
+                            tables.append(std)
+    except Exception:
+        pass
+    return tables
+
+
+def parse_pdf_certificate(uploaded_file):
+    """PDF MTR/시험성적서에서 표 또는 key-value 텍스트를 추출합니다."""
+    table_frames = _extract_pdf_tables(uploaded_file)
+    if table_frames:
+        return pd.concat(table_frames, ignore_index=True)
+    text = _extract_pdf_text(uploaded_file)
+    if not text.strip():
+        return pd.DataFrame(columns=_measured_columns())
+
+    row = {c: np.nan for c in _measured_columns()}
+    row["note"] = f"PDF 자동 추출: {uploaded_file.name}"
+    patterns = {
+        "heat_no": r"(?:Heat\s*(?:No\.?|Number)|용해번호|히트번호)\s*[:：]?\s*([A-Za-z0-9\-_/]+)",
+        "material_grade": r"(?:Material|Grade|Spec|재질|규격)\s*[:：]?\s*([A-Za-z0-9\-_/ .]+)",
+        "thickness_mm": r"(?:Thickness|THK|두께)\s*[:：]?\s*([0-9.]+)\s*mm?",
+        "actual_ys": r"(?:YS|Yield\s*Strength|항복강도|Rp0\.2)\s*[:：]?\s*([0-9.]+)",
+        "actual_ts": r"(?:TS|UTS|Tensile\s*Strength|인장강도|Rm)\s*[:：]?\s*([0-9.]+)",
+        "actual_el": r"(?:EL|Elongation|연신율|A5)\s*[:：]?\s*([0-9.]+)",
+        "actual_ra": r"(?:RA|Reduction\s*of\s*Area|단면수축률|Z)\s*[:：]?\s*([0-9.]+)",
+        "actual_cvn": r"(?:CVN|Charpy|Impact|충격치|흡수에너지)\s*[:：]?\s*([0-9.]+)",
+        "actual_hb": r"(?:HBW?|Brinell|Hardness|경도)\s*[:：]?\s*([0-9.]+)",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            row[key] = m.group(1).strip()
+    for e in ELEMENT_LIST:
+        m = re.search(rf"\b{re.escape(e)}\b\s*[:：]?\s*([0-9]+\.?[0-9]*)", text, flags=re.IGNORECASE)
+        if m:
+            row[f"comp_{e}"] = m.group(1)
+    return _standardize_import_dataframe(pd.DataFrame([row]))
+
+
+def _complete_import_rows(parsed_df, default_meta=None):
+    """추출된 표준 컬럼을 예측 잔차가 포함된 누적 DB 레코드로 변환합니다."""
+    default_meta = default_meta or {}
+    rows = []
+    for _, r in parsed_df.iterrows():
+        comp = {e: _safe_float(r.get(f"comp_{e}"), 0.0) for e in ELEMENT_LIST}
+        actuals = {k: _safe_float(r.get(f"actual_{k}"), np.nan) for k in PROP_KEYS}
+        if all(pd.isna(v) for v in actuals.values()):
+            continue
+        p0 = {"type": str(r.get("p0_type") if pd.notna(r.get("p0_type")) else default_meta.get("p0_type", "None")),
+              "temp": _safe_float(r.get("p0_temp"), default_meta.get("p0_temp", 950)),
+              "time": _safe_float(r.get("p0_time_min"), default_meta.get("p0_time_min", 240)),
+              "cooling": str(r.get("p0_cooling") if pd.notna(r.get("p0_cooling")) else default_meta.get("p0_cooling", "공냉(AC)"))}
+        p1 = {"type": str(r.get("p1_type") if pd.notna(r.get("p1_type")) else default_meta.get("p1_type", "Quenching")),
+              "temp": _safe_float(r.get("p1_temp"), default_meta.get("p1_temp", 930)),
+              "time": _safe_float(r.get("p1_time_min"), default_meta.get("p1_time_min", 360)),
+              "cooling": str(r.get("p1_cooling") if pd.notna(r.get("p1_cooling")) else default_meta.get("p1_cooling", "수냉(WQ)"))}
+        p2 = {"type": str(r.get("p2_type") if pd.notna(r.get("p2_type")) else default_meta.get("p2_type", "Tempering")),
+              "temp": _safe_float(r.get("p2_temp"), default_meta.get("p2_temp", 610)),
+              "time": _safe_float(r.get("p2_time_min"), default_meta.get("p2_time_min", 240)),
+              "cooling": str(r.get("p2_cooling") if pd.notna(r.get("p2_cooling")) else default_meta.get("p2_cooling", "공냉(AC)"))}
+        p3 = {"type": str(r.get("p3_type") if pd.notna(r.get("p3_type")) else default_meta.get("p3_type", "S/R")),
+              "temp": _safe_float(r.get("p3_temp"), default_meta.get("p3_temp", 625)),
+              "time": _safe_float(r.get("p3_time_min"), default_meta.get("p3_time_min", 300)),
+              "cooling": str(r.get("p3_cooling") if pd.notna(r.get("p3_cooling")) else default_meta.get("p3_cooling", "노냉(FC)"))}
+        rows.append(build_measured_record(
+            heat_no=str(r.get("heat_no") if pd.notna(r.get("heat_no")) else ""),
+            material_grade=str(r.get("material_grade") if pd.notna(r.get("material_grade")) else default_meta.get("material_grade", "Imported")),
+            product_name=str(r.get("product_name") if pd.notna(r.get("product_name")) else default_meta.get("product_name", "Imported Casting")),
+            section_type=str(r.get("section_type") if pd.notna(r.get("section_type")) else default_meta.get("section_type", "Coupon")),
+            comp=comp, p0=p0, p1=p1, p2=p2, p3=p3,
+            thickness=_safe_float(r.get("thickness_mm"), default_meta.get("thickness_mm", 150)),
+            coupon_thick=_safe_float(r.get("coupon_thickness_mm"), default_meta.get("coupon_thickness_mm", 50)),
+            test_temp=_safe_float(r.get("test_temp_c"), default_meta.get("test_temp_c", -46)),
+            actuals=actuals,
+            note=str(r.get("note") if pd.notna(r.get("note")) else "자동 업로드 반영")
+        ))
+    return pd.DataFrame(rows)[_measured_columns()] if rows else pd.DataFrame(columns=_measured_columns())
+
+
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.5.0", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.6.0", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -118,7 +346,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.5.0: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.6.0: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
 
 # [SIDEBAR - GLOBAL PARAMETERS]
 with st.sidebar:
@@ -641,21 +869,50 @@ with tab_measured:
         st.success("실측 데이터가 저장되었고, 다음 예측부터 보정 후보 데이터로 사용됩니다.")
 
     st.divider()
-    st.subheader("2️⃣ CSV 업로드 / 다운로드 / 누적 데이터 관리")
-    st.caption("동일 컬럼 구조의 CSV를 업로드하면 기존 DB에 누적됩니다. MTR/시험성적서 데이터를 엑셀에서 정리한 뒤 CSV로 저장하여 업로드할 수 있습니다.")
-    uploaded_csv = st.file_uploader("실측 데이터 CSV 업로드", type=["csv"])
-    if uploaded_csv is not None:
+    st.subheader("2️⃣ Excel / PDF / CSV 자동 업로드 및 누적 데이터 관리")
+    st.caption("MTR, 기계시험 성적서, Heat 성분표를 Excel 또는 PDF로 업로드하면 주요 성분/열처리/실측 물성을 자동 추출합니다. PDF는 양식 편차가 크므로 미리보기 확인 후 DB에 반영하세요.")
+
+    up_col1, up_col2 = st.columns([2, 1])
+    uploaded_file = up_col1.file_uploader("실측 성적서 업로드", type=["xlsx", "xls", "csv", "pdf"], help="권장: Excel은 첫 행에 C, Si, Mn, YS, TS, EL, RA, CVN, HB 등 컬럼명을 넣으면 가장 정확합니다.")
+    with up_col2:
+        st.write("자동 인식 가능 항목")
+        st.caption("Heat No. / 재질 / 두께 / C~Zr 20원소 / 열처리 조건 / YS·TS·EL·RA·CVN·HB")
+
+    if uploaded_file is not None:
         try:
-            up_df = pd.read_csv(uploaded_csv)
-            current = load_measured_db()
-            for col in _measured_columns():
-                if col not in up_df.columns:
-                    up_df[col] = np.nan
-            merged = pd.concat([current, up_df[_measured_columns()]], ignore_index=True)
-            save_measured_db(merged)
-            st.success(f"CSV {len(up_df)}건을 누적 DB에 반영했습니다.")
+            file_name = uploaded_file.name.lower()
+            if file_name.endswith(".pdf"):
+                parsed_df = parse_pdf_certificate(uploaded_file)
+            else:
+                parsed_df = parse_excel_or_csv(uploaded_file)
+
+            if parsed_df.empty:
+                st.warning("자동 추출 가능한 행을 찾지 못했습니다. Excel은 컬럼명을 확인하고, PDF는 텍스트 선택이 가능한 성적서인지 확인해 주세요.")
+            else:
+                default_meta = {
+                    "material_grade": material_grade, "product_name": product_name, "section_type": section_type,
+                    "thickness_mm": actual_thickness, "coupon_thickness_mm": actual_coupon_thick, "test_temp_c": actual_test_temp,
+                    "p0_type": a_p0_type, "p0_temp": a_p0_temp, "p0_time_min": a_p0_time, "p0_cooling": a_p0_cool,
+                    "p1_type": a_p1_type, "p1_temp": a_p1_temp, "p1_time_min": a_p1_time, "p1_cooling": a_p1_cool,
+                    "p2_type": a_p2_type, "p2_temp": a_p2_temp, "p2_time_min": a_p2_time, "p2_cooling": a_p2_cool,
+                    "p3_type": a_p3_type, "p3_temp": a_p3_temp, "p3_time_min": a_p3_time, "p3_cooling": a_p3_cool,
+                }
+                completed_df = _complete_import_rows(parsed_df, default_meta=default_meta)
+                st.success(f"자동 추출 완료: 후보 {len(parsed_df)}행 / 보정 DB 반영 가능 {len(completed_df)}행")
+                st.write("#### 추출 미리보기")
+                preview_cols = ["heat_no", "material_grade", "product_name", "thickness_mm", "comp_C", "comp_Si", "comp_Mn", "actual_ys", "actual_ts", "actual_el", "actual_ra", "actual_cvn", "actual_hb", "note"]
+                st.dataframe(completed_df[[c for c in preview_cols if c in completed_df.columns]], use_container_width=True, hide_index=True)
+
+                if st.button("✅ 미리보기 데이터 누적 DB 반영", use_container_width=True):
+                    current = load_measured_db()
+                    merged = pd.concat([current, completed_df], ignore_index=True)
+                    save_measured_db(merged)
+                    st.success(f"업로드 파일에서 추출한 {len(completed_df)}건을 누적 DB에 반영했습니다. 다음 예측부터 보정 데이터로 사용됩니다.")
         except Exception as e:
-            st.error(f"CSV 업로드 오류: {e}")
+            st.error(f"파일 자동 업로드/추출 오류: {e}")
+
+    template_cols = ["heat_no", "material_grade", "product_name", "section_type", "thickness_mm", "coupon_thickness_mm", "test_temp_c"] + [f"comp_{e}" for e in ELEMENT_LIST] + [f"actual_{k}" for k in PROP_KEYS] + ["p1_temp", "p1_time_min", "p1_cooling", "p2_temp", "p2_time_min", "p3_temp", "p3_time_min", "note"]
+    st.download_button("⬇️ Excel/CSV 업로드 템플릿 다운로드", pd.DataFrame(columns=template_cols).to_csv(index=False, encoding="utf-8-sig"), file_name="sentinel_measured_upload_template.csv", mime="text/csv", use_container_width=True)
 
     db_df = load_measured_db()
     if not db_df.empty:
@@ -668,7 +925,8 @@ with tab_measured:
         st.info("아직 누적된 실측 데이터가 없습니다.")
 
     st.divider()
-    st.subheader("3️⃣ 보정 방식 설명")
-    st.write("- 실측 저장 시 현재 엔진 예측값과 실측값의 차이, 즉 `actual - predicted` 잔차를 함께 저장합니다.")
+    st.subheader("3️⃣ 자동 추출 및 보정 방식 설명")
+    st.write("- 수동 입력 또는 Excel/PDF/CSV 업로드 시 현재 엔진 예측값과 실측값의 차이, 즉 `actual - predicted` 잔차를 함께 저장합니다.")
     st.write("- 예측 시뮬레이션에서는 두께, Ceq, Pcm이 유사한 누적 데이터에 더 높은 가중치를 부여하여 YS/TS/EL/RA/CVN/HB를 보정합니다.")
+    st.write("- PDF 자동 추출은 성적서 양식에 따라 인식률 차이가 있으므로, 반드시 미리보기 값 확인 후 DB에 반영하는 구조로 설계했습니다.")
     st.warning("주의: 데이터가 적을 때는 보정 신뢰도가 낮습니다. 최소 3건 이상부터 보정이 적용되며, 동일 재질·동일 열처리·유사 두께 데이터가 많을수록 정확도가 높아집니다.")
