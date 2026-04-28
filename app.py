@@ -289,13 +289,16 @@ with tab_inverse:
         st.divider()
         st.write("#### 1️⃣ 추천 성분 배합비 (Chemical Composition)")
         st.info("💡 목표 물성을 시험편에 맞출 때와 제품 본체에 맞출 때 필요한 탄소(C) 배합량이 어떻게 다른지 비교합니다.")
-        c_comp1, c_comp2 = st.columns(2)
-        with c_comp1:
-            st.write(f"🔹 **시험편 기준 최소 배합비**")
-            st.dataframe(pd.DataFrame([inverse_results['alloy_coupon']]), use_container_width=True)
-        with c_comp2:
-            st.write(f"🔸 **제품 본체 기준 최소 배합비**")
-            st.dataframe(pd.DataFrame([inverse_results['alloy_prod']]), use_container_width=True)
+        
+        def styled_alloy_df(alloy_dict):
+            df = pd.DataFrame([alloy_dict])
+            return df.style.format({"C": "{:.2f}"})
+        
+        st.write(f"🔸 **제품 본체(Core) 기준 최소 배합비**")
+        st.dataframe(styled_alloy_df(inverse_results['alloy_prod']), use_container_width=True)
+        
+        st.write(f"🔹 **시험편(Coupon) 기준 최소 배합비**")
+        st.dataframe(styled_alloy_df(inverse_results['alloy_coupon']), use_container_width=True)
         
         st.write("#### 2️⃣ 추천 열처리 공정 스케줄")
         p_list = []
