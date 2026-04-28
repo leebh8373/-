@@ -8,7 +8,7 @@ import importlib
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.2.1" # Force Reload Patch
+__version__ = "6.4.1" # Mass Effect & Hardness Report Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -18,7 +18,7 @@ except ImportError:
     IS_PLOTLY_AVAILABLE = False
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.0", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.4.1", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -30,7 +30,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.0: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.4.1: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
 
 # [SIDEBAR - GLOBAL PARAMETERS]
 with st.sidebar:
@@ -161,7 +161,7 @@ with tab_predict:
             st.metric("연신율 (EL)", f"{coupon_report['el']} %")
             st.metric("단면수축률 (RA)", f"{coupon_report['ra']} %")
             st.metric("충격치 (CVN)", f"{coupon_report['cvn']} J")
-            st.metric("브리넬 경도 (HB)", f"{coupon_report['hb']}")
+            st.metric("브리넬 경도 (HB)", f"{coupon_report['hb']} HB")
 
         with rep_col2:
             st.subheader(f"🔸 제품 본체(Core) 기준 ({input_thickness}mm)")
@@ -170,7 +170,7 @@ with tab_predict:
             st.metric("연신율 (EL)", f"{final_report['el']} %")
             st.metric("단면수축률 (RA)", f"{final_report['ra']} %")
             st.metric("충격치 (CVN)", f"{final_report['cvn']} J")
-            st.metric("브리넬 경도 (HB)", f"{final_report['hb']}")
+            st.metric("브리넬 경도 (HB)", f"{final_report['hb']} HB")
 
         st.divider()
         st.subheader("🧪 탄소당량 분석 (Carbon Equivalent Analysis)")
@@ -327,6 +327,7 @@ with tab_inverse:
             st.metric("연신율 (EL)", f"{c_rep['el']} %")
             st.metric("단면수축률 (RA)", f"{c_rep['ra']} %")
             st.metric("충격치 (CVN)", f"{c_rep['cvn']} J")
+            st.metric("브리넬 경도 (HB)", f"{c_rep['hb']} HB")
 
         with vr_col2:
             st.subheader(f"🔸 제품 본체 코어 예상 ({target_thick}mm)")
@@ -335,12 +336,14 @@ with tab_inverse:
             st.metric("연신율 (EL)", f"{p_rep['el']} %")
             st.metric("단면수축률 (RA)", f"{p_rep['ra']} %")
             st.metric("충격치 (CVN)", f"{p_rep['cvn']} J")
+            st.metric("브리넬 경도 (HB)", f"{p_rep['hb']} HB")
 
         st.divider()
         st.subheader("🔍 역설계 결과: 두께별 물성 민감도 분석 (Mass Effect Analysis)")
-        st.write("추천된 합금 성분 및 열처리 스케줄이 실제 제품 두께에 따라 강도에 미치는 영향을 시뮬레이션합니다.")
+        st.write("추천된 합금 성분 및 열처리 스케줄이 실제 제품 두께에 따라 강도·연성·충격치·경도에 미치는 영향을 시뮬레이션합니다.")
+        st.caption("※ Mass Effect는 단면 두께 증가에 따른 중심부 냉각속도 저하 및 경화능 한계를 반영한 민감도 분석입니다.")
         
-        thickness_range = np.linspace(10, max(1000, target_thick*2), 50)
+        thickness_range = np.linspace(10, max(1000, target_thick*2), 60)
         inv_sim_results = []
         inv_alloy = inverse_results['alloy']
         inv_p0 = {'type': inverse_results['p0']['mode'], 'temp': inverse_results['p0']['temp'], 'time': inverse_results['p0']['time'], 'cooling': inverse_results['p0']['cool']} if inverse_results.get('p0') else None
@@ -350,21 +353,72 @@ with tab_inverse:
         
         for t in thickness_range:
             ts_1st = calc.calculate_1st_stage_physics(inv_alloy, inv_p1, t)
-            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy, p1=inv_p1, thickness=t, p0=inv_p0)
-            inv_sim_results.append({'Thickness': t, 'YS': rep['ys'], 'TS': rep['ts']})
+            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy, p1=inv_p1, thickness=t, p0=inv_p0, ceq_standard=ceq_std)
+            inv_sim_results.append({
+                'Thickness': round(float(t), 1),
+                'YS': rep['ys'], 'TS': rep['ts'], 'EL': rep['el'], 'RA': rep['ra'], 'CVN': rep['cvn'], 'HB': rep['hb']
+            })
         
         inv_sim_df = pd.DataFrame(inv_sim_results)
+
+        # Coupon / product / maximum thickness comparison table
+        def mass_point(section_thickness, label):
+            ts_1st = calc.calculate_1st_stage_physics(inv_alloy, inv_p1, section_thickness)
+            rep = calc.get_final_expert_simulation(ts_1st, inv_p2, inv_p3, input_test_temp, inv_alloy, p1=inv_p1, thickness=section_thickness, p0=inv_p0, ceq_standard=ceq_std)
+            return {
+                '구분': label, '두께(mm)': section_thickness,
+                'YS(MPa)': rep['ys'], 'TS(MPa)': rep['ts'], 'EL(%)': rep['el'],
+                'RA(%)': rep['ra'], 'CVN(J)': rep['cvn'], 'HB': rep['hb']
+            }
+
+        mass_summary_df = pd.DataFrame([
+            mass_point(input_coupon_thick, '시험편 Coupon'),
+            mass_point(target_thick, '제품 본체 Core'),
+            mass_point(max(1000, target_thick*2), '검토 최대 두께')
+        ])
+        st.write("#### 📌 두께 기준별 예측 물성 요약")
+        st.dataframe(mass_summary_df, use_container_width=True, hide_index=True)
+
+        # Sensitivity loss/gain from coupon to product core
+        coupon_row = mass_summary_df.iloc[0]
+        core_row = mass_summary_df.iloc[1]
+        loss_cols = st.columns(4)
+        loss_cols[0].metric("TS 변화", f"{core_row['TS(MPa)'] - coupon_row['TS(MPa)']:.1f} MPa")
+        loss_cols[1].metric("YS 변화", f"{core_row['YS(MPa)'] - coupon_row['YS(MPa)']:.1f} MPa")
+        loss_cols[2].metric("CVN 변화", f"{core_row['CVN(J)'] - coupon_row['CVN(J)']:.1f} J")
+        loss_cols[3].metric("HB 변화", f"{core_row['HB'] - coupon_row['HB']:.1f} HB")
         
         if IS_PLOTLY_AVAILABLE:
-            fig_inv_sens = go.Figure()
-            fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['TS'], name='인장강도 (TS)', line=dict(color='#ef4444', width=3)))
-            fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['YS'], name='항복강도 (YS)', line=dict(color='#3b82f6', width=3, dash='dash')))
-            fig_inv_sens.update_layout(
-                title="역설계 도출 조건 적용 시 두께별 강도 변화",
-                xaxis_title="두께 (mm)", yaxis_title="강도 (MPa)",
-                hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            fig_inv_sens.add_vline(x=target_thick, line_dash="dot", line_color="green", annotation_text=f"목표 두께: {target_thick}mm")
-            st.plotly_chart(fig_inv_sens, use_container_width=True)
+            strength_tab, ductility_tab, toughness_tab = st.tabs(["강도/경도", "연성", "충격치"])
+            with strength_tab:
+                fig_inv_sens = go.Figure()
+                fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['TS'], name='인장강도 (TS)', line=dict(color='#ef4444', width=3)))
+                fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['YS'], name='항복강도 (YS)', line=dict(color='#3b82f6', width=3, dash='dash')))
+                fig_inv_sens.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['HB'], name='브리넬 경도 (HB)', yaxis='y2', line=dict(color='#f59e0b', width=3, dash='dot')))
+                fig_inv_sens.update_layout(
+                    title="역설계 도출 조건 적용 시 두께별 강도 및 경도 변화",
+                    xaxis_title="두께 (mm)", yaxis_title="강도 (MPa)",
+                    yaxis2=dict(title="경도 (HB)", overlaying='y', side='right'),
+                    hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                fig_inv_sens.add_vline(x=target_thick, line_dash="dot", line_color="green", annotation_text=f"목표 두께: {target_thick}mm")
+                fig_inv_sens.add_vline(x=input_coupon_thick, line_dash="dash", line_color="gray", annotation_text=f"Coupon: {input_coupon_thick}mm")
+                st.plotly_chart(fig_inv_sens, use_container_width=True)
+            with ductility_tab:
+                fig_duct = go.Figure()
+                fig_duct.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['EL'], name='연신율 (EL)', line=dict(width=3)))
+                fig_duct.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['RA'], name='단면수축률 (RA)', line=dict(width=3, dash='dash')))
+                fig_duct.update_layout(title="두께별 연성 변화", xaxis_title="두께 (mm)", yaxis_title="연성 (%)", hovermode="x unified")
+                fig_duct.add_vline(x=target_thick, line_dash="dot", line_color="green", annotation_text=f"목표 두께: {target_thick}mm")
+                st.plotly_chart(fig_duct, use_container_width=True)
+            with toughness_tab:
+                fig_cvn = go.Figure()
+                fig_cvn.add_trace(go.Scatter(x=inv_sim_df['Thickness'], y=inv_sim_df['CVN'], name='충격치 (CVN)', line=dict(width=3)))
+                fig_cvn.add_hline(y=target_cvn, line_dash="dash", line_color="red", annotation_text=f"목표 CVN: {target_cvn}J")
+                fig_cvn.add_vline(x=target_thick, line_dash="dot", line_color="green", annotation_text=f"목표 두께: {target_thick}mm")
+                fig_cvn.update_layout(title="두께별 CVN 민감도", xaxis_title="두께 (mm)", yaxis_title="CVN (J)", hovermode="x unified")
+                st.plotly_chart(fig_cvn, use_container_width=True)
         else:
-            st.line_chart(inv_sim_df.set_index('Thickness'))
+            st.line_chart(inv_sim_df.set_index('Thickness')[['TS', 'YS', 'HB', 'CVN', 'EL', 'RA']])
+
+        st.warning("⚠️ 두께 증가 시 TS/YS/HB 저하가 크거나 CVN이 급격히 낮아지는 구간은 경화능 부족 또는 중심부 냉각속도 부족 가능성이 큰 영역입니다. 실제 양산 전에는 제품부착 시험편 또는 대표 단면 시험으로 보정이 필요합니다.")
