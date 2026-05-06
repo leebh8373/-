@@ -11,7 +11,7 @@ from io import BytesIO
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.6.0" # Excel/PDF Auto Import + Measured Data Learning Patch
+__version__ = "6.6.1" # Excel/PDF Auto Import + Manual Thickness Override Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -317,24 +317,34 @@ def _complete_import_rows(parsed_df, default_meta=None):
               "temp": _safe_float(r.get("p3_temp"), default_meta.get("p3_temp", 625)),
               "time": _safe_float(r.get("p3_time_min"), default_meta.get("p3_time_min", 300)),
               "cooling": str(r.get("p3_cooling") if pd.notna(r.get("p3_cooling")) else default_meta.get("p3_cooling", "노냉(FC)"))}
+        force_manual_thickness = bool(default_meta.get("force_manual_thickness", False))
+        if force_manual_thickness:
+            thickness_value = default_meta.get("thickness_mm", 150)
+            coupon_thick_value = default_meta.get("coupon_thickness_mm", 50)
+            thickness_note = f" | thickness_manual_override: product={thickness_value}mm, coupon={coupon_thick_value}mm"
+        else:
+            thickness_value = _safe_float(r.get("thickness_mm"), default_meta.get("thickness_mm", 150))
+            coupon_thick_value = _safe_float(r.get("coupon_thickness_mm"), default_meta.get("coupon_thickness_mm", 50))
+            thickness_note = ""
+
         rows.append(build_measured_record(
             heat_no=str(r.get("heat_no") if pd.notna(r.get("heat_no")) else ""),
             material_grade=str(r.get("material_grade") if pd.notna(r.get("material_grade")) else default_meta.get("material_grade", "Imported")),
             product_name=str(r.get("product_name") if pd.notna(r.get("product_name")) else default_meta.get("product_name", "Imported Casting")),
             section_type=str(r.get("section_type") if pd.notna(r.get("section_type")) else default_meta.get("section_type", "Coupon")),
             comp=comp, p0=p0, p1=p1, p2=p2, p3=p3,
-            thickness=_safe_float(r.get("thickness_mm"), default_meta.get("thickness_mm", 150)),
-            coupon_thick=_safe_float(r.get("coupon_thickness_mm"), default_meta.get("coupon_thickness_mm", 50)),
+            thickness=thickness_value,
+            coupon_thick=coupon_thick_value,
             test_temp=_safe_float(r.get("test_temp_c"), default_meta.get("test_temp_c", -46)),
             actuals=actuals,
-            note=str(r.get("note") if pd.notna(r.get("note")) else "자동 업로드 반영")
+            note=(str(r.get("note") if pd.notna(r.get("note")) else "자동 업로드 반영") + thickness_note)
         ))
     return pd.DataFrame(rows)[_measured_columns()] if rows else pd.DataFrame(columns=_measured_columns())
 
 
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.6.0", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.6.1", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -870,13 +880,20 @@ with tab_measured:
 
     st.divider()
     st.subheader("2️⃣ Excel / PDF / CSV 자동 업로드 및 누적 데이터 관리")
-    st.caption("MTR, 기계시험 성적서, Heat 성분표를 Excel 또는 PDF로 업로드하면 주요 성분/열처리/실측 물성을 자동 추출합니다. PDF는 양식 편차가 크므로 미리보기 확인 후 DB에 반영하세요.")
+    st.caption("MTR, 기계시험 성적서, Heat 성분표를 Excel 또는 PDF로 업로드하면 Heat No., 성분, 열처리, 실측 물성을 자동 추출합니다. 본품 두께와 Coupon 두께는 파일에서 읽지 않고 아래 수동 입력값을 강제 적용합니다.")
+
+    st.info("📌 업로드 파일의 두께 표기는 양식별 의미가 다를 수 있으므로, 보정 DB에는 아래에 입력한 본품 두께와 Coupon 두께가 우선 적용됩니다.")
+    th_col1, th_col2, th_col3 = st.columns(3)
+    upload_product_thickness = th_col1.number_input("업로드 데이터 본품 두께(mm)", 10, 2500, input_thickness, key="upload_product_thickness")
+    upload_coupon_thickness = th_col2.number_input("업로드 데이터 Coupon 두께(mm)", 10, 2500, input_coupon_thick, key="upload_coupon_thickness")
+    upload_force_thickness = th_col3.checkbox("파일 내 두께값 무시하고 위 두께 적용", value=True, key="upload_force_thickness")
 
     up_col1, up_col2 = st.columns([2, 1])
     uploaded_file = up_col1.file_uploader("실측 성적서 업로드", type=["xlsx", "xls", "csv", "pdf"], help="권장: Excel은 첫 행에 C, Si, Mn, YS, TS, EL, RA, CVN, HB 등 컬럼명을 넣으면 가장 정확합니다.")
     with up_col2:
         st.write("자동 인식 가능 항목")
-        st.caption("Heat No. / 재질 / 두께 / C~Zr 20원소 / 열처리 조건 / YS·TS·EL·RA·CVN·HB")
+        st.caption("Heat No. / 재질 / C~Zr 20원소 / 열처리 조건 / YS·TS·EL·RA·CVN·HB")
+        st.caption("두께: 위 수동 입력값 적용")
 
     if uploaded_file is not None:
         try:
@@ -891,14 +908,19 @@ with tab_measured:
             else:
                 default_meta = {
                     "material_grade": material_grade, "product_name": product_name, "section_type": section_type,
-                    "thickness_mm": actual_thickness, "coupon_thickness_mm": actual_coupon_thick, "test_temp_c": actual_test_temp,
+                    "thickness_mm": upload_product_thickness, "coupon_thickness_mm": upload_coupon_thickness, "force_manual_thickness": upload_force_thickness, "test_temp_c": actual_test_temp,
                     "p0_type": a_p0_type, "p0_temp": a_p0_temp, "p0_time_min": a_p0_time, "p0_cooling": a_p0_cool,
                     "p1_type": a_p1_type, "p1_temp": a_p1_temp, "p1_time_min": a_p1_time, "p1_cooling": a_p1_cool,
                     "p2_type": a_p2_type, "p2_temp": a_p2_temp, "p2_time_min": a_p2_time, "p2_cooling": a_p2_cool,
                     "p3_type": a_p3_type, "p3_temp": a_p3_temp, "p3_time_min": a_p3_time, "p3_cooling": a_p3_cool,
                 }
+                if upload_force_thickness:
+                    parsed_df["thickness_mm"] = upload_product_thickness
+                    parsed_df["coupon_thickness_mm"] = upload_coupon_thickness
                 completed_df = _complete_import_rows(parsed_df, default_meta=default_meta)
                 st.success(f"자동 추출 완료: 후보 {len(parsed_df)}행 / 보정 DB 반영 가능 {len(completed_df)}행")
+                if upload_force_thickness:
+                    st.caption(f"두께 적용 방식: 파일 내 두께값 무시 → 본품 {upload_product_thickness} mm / Coupon {upload_coupon_thickness} mm 적용")
                 st.write("#### 추출 미리보기")
                 preview_cols = ["heat_no", "material_grade", "product_name", "thickness_mm", "comp_C", "comp_Si", "comp_Mn", "actual_ys", "actual_ts", "actual_el", "actual_ra", "actual_cvn", "actual_hb", "note"]
                 st.dataframe(completed_df[[c for c in preview_cols if c in completed_df.columns]], use_container_width=True, hide_index=True)
@@ -928,5 +950,6 @@ with tab_measured:
     st.subheader("3️⃣ 자동 추출 및 보정 방식 설명")
     st.write("- 수동 입력 또는 Excel/PDF/CSV 업로드 시 현재 엔진 예측값과 실측값의 차이, 즉 `actual - predicted` 잔차를 함께 저장합니다.")
     st.write("- 예측 시뮬레이션에서는 두께, Ceq, Pcm이 유사한 누적 데이터에 더 높은 가중치를 부여하여 YS/TS/EL/RA/CVN/HB를 보정합니다.")
+    st.write("- 업로드 자동 반영 시 본품 두께와 Coupon 두께는 파일 추출값이 아니라 사용자가 입력한 값으로 강제 적용할 수 있습니다.")
     st.write("- PDF 자동 추출은 성적서 양식에 따라 인식률 차이가 있으므로, 반드시 미리보기 값 확인 후 DB에 반영하는 구조로 설계했습니다.")
     st.warning("주의: 데이터가 적을 때는 보정 신뢰도가 낮습니다. 최소 3건 이상부터 보정이 적용되며, 동일 재질·동일 열처리·유사 두께 데이터가 많을수록 정확도가 높아집니다.")
