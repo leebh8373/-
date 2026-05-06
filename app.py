@@ -487,9 +487,162 @@ def _merge_standard_rows(primary, fallback):
     return out
 
 
+
+def _mid_temp_from_range(temp_range):
+    """'895~903' 같은 온도 범위에서 평균 온도를 반환합니다."""
+    try:
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", str(temp_range))]
+        if len(nums) >= 2:
+            return round((nums[0] + nums[1]) / 2.0, 1)
+        if nums:
+            return nums[0]
+    except Exception:
+        pass
+    return np.nan
+
+
+def _parse_dca_material_certificate(text, file_name=""):
+    """대창 DCA-153-2 계열 Material Certificate 전용 파서.
+
+    일반 PDF 표 추출기는 병합 셀 때문에 1행만 만들거나 Spec/Min. 값을 실측값으로
+    오인식하는 경우가 있다. 본 파서는 다음 구조를 명시적으로 읽는다.
+    - Chemical Composition: No. / Cast No.별 4개 행
+    - Tensile/Impact Test: Specimen No.별 실측 YS/TS/EL/RA/CVN AVG
+    - Heat Treatment: 'No. 4'와 '1,2,3'처럼 그룹으로 표시된 열처리 조건을
+      각 Cast No. 행에 전개하여 4개 레코드로 만든다.
+    """
+    if not text or not re.search(r"MATERIAL\s+CERTIFICATE", text, re.I):
+        return pd.DataFrame(columns=_measured_columns())
+    if not re.search(r"Cast\s+No\.?", text, re.I) or not re.search(r"Heat\s+Treatment", text, re.I):
+        return pd.DataFrame(columns=_measured_columns())
+
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in str(text).splitlines() if ln.strip()]
+    joined = "\n".join(lines)
+
+    product_name = ""
+    material_grade = ""
+    cert_no = ""
+    m = re.search(r"Product\s+name\s+(.+?)(?:\s+Drawing\s+No\.|$)", joined, re.I)
+    if m:
+        product_name = m.group(1).strip()
+    m = re.search(r"Material\s+Spec\.\s+(.+?)(?:\s+ABS\s+Cert\s+No\.|$)", joined, re.I)
+    if m:
+        material_grade = m.group(1).strip()
+    m = re.search(r"Certificate\s+No\.\s*([A-Za-z0-9\-_]+)", joined, re.I)
+    if m:
+        cert_no = m.group(1).strip()
+
+    # 1) Cast No.별 화학성분
+    cert_elems = ["C", "Si", "Mn", "P", "S", "Ni", "Cr", "Mo", "Cu", "V", "Al", "N", "Nb", "Ti", "Sn", "Sb", "As", "B", "SRE", "CE"]
+    chem_by_no = {}
+    for line in lines:
+        m = re.match(r"^(\d+)\s+([A-Za-z0-9\-]+)\s+\d+\s+[\d,]+\s+Ladle\s+(.+)$", line)
+        if not m:
+            continue
+        no = int(m.group(1))
+        cast_no = m.group(2).strip()
+        nums = [_safe_float(x, np.nan) for x in re.findall(r"\d+\.\d+|\d+", m.group(3))[:len(cert_elems)]]
+        if len(nums) < 8:
+            continue
+        vals = dict(zip(cert_elems, nums))
+        comp = {f"comp_{e}": np.nan for e in ELEMENT_LIST}
+        # Certificate header order differs from Sentinel internal order, so assign by element symbol.
+        for e in ELEMENT_LIST:
+            if e in vals:
+                comp[f"comp_{e}"] = vals[e]
+        chem_by_no[no] = {"heat_no": cast_no, **comp, "cert_ce": vals.get("CE", np.nan), "cert_sre": vals.get("SRE", np.nan)}
+
+    # 2) Specimen별 실측 물성. Min./Spec. 라인은 제외하고 No. E25~ 형태만 읽는다.
+    mech_by_no = {}
+    for line in lines:
+        m = re.match(
+            r"^(\d+)\s+(E\d+)\s+.*?\bRT\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+2V.*?\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)(?:\s|$)",
+            line,
+            flags=re.I,
+        )
+        if not m:
+            continue
+        no = int(m.group(1))
+        mech_by_no[no] = {
+            "section_type": m.group(2),
+            "test_temp_c": -20.0 if re.search(r"-20\s*°?C|-20\s*℃|-20", line) else np.nan,
+            "actual_ys": _safe_float(m.group(3), np.nan),
+            "actual_ts": _safe_float(m.group(4), np.nan),
+            "actual_el": _safe_float(m.group(5), np.nan),
+            "actual_ra": _safe_float(m.group(6), np.nan),
+            "actual_cvn": _safe_float(m.group(10), np.nan),  # 1st/2nd/3rd 뒤 AVG.
+            "actual_hb": np.nan,
+        }
+
+    # 3) Heat Treatment 그룹 전개: 예) 'No. 4 1,2,3'
+    ht_by_no = {}
+    try:
+        ht_idx = next(i for i, l in enumerate(lines) if re.fullmatch(r"Heat\s+Treatment", l, flags=re.I))
+        no_line = lines[ht_idx + 1] if ht_idx + 1 < len(lines) else ""
+        groups = [[int(x) for x in tok.split(",") if x.strip().isdigit()] for tok in re.findall(r"\d+(?:,\d+)*", no_line)]
+        proc_alias = {
+            "Preliminary": ("p0", "Normalizing", "공냉(AC)"),
+            "Quenching": ("p1", "Quenching", "수냉(WQ)"),
+            "Tempering": ("p2", "Tempering", "공냉(AC)"),
+            "PWHT": ("p3", "PWHT", "노냉(FC)"),
+        }
+        for line in lines[ht_idx + 2: ht_idx + 12]:
+            pm = re.match(r"^(Preliminary|Quenching|Tempering|PWHT):\s*(.*)", line, flags=re.I)
+            if not pm:
+                continue
+            pname = pm.group(1).capitalize()
+            if pname.upper() == "PWHT":
+                pname = "PWHT"
+            prefix, ptype, cooling = proc_alias[pname]
+            vals = re.findall(r"(\d+\s*~\s*\d+)\s*˚?C\s*([0-9.]+)\s*Hr", pm.group(2), flags=re.I)
+            for group_idx, nos in enumerate(groups):
+                if group_idx >= len(vals):
+                    continue
+                temp_range, hr = vals[group_idx]
+                temp = _mid_temp_from_range(temp_range)
+                time_min = round(_safe_float(hr, 0.0) * 60.0, 1)
+                for no in nos:
+                    ht_by_no.setdefault(no, {})[f"{prefix}_type"] = ptype
+                    ht_by_no.setdefault(no, {})[f"{prefix}_temp"] = temp
+                    ht_by_no.setdefault(no, {})[f"{prefix}_time_min"] = time_min
+                    ht_by_no.setdefault(no, {})[f"{prefix}_cooling"] = cooling
+                    ht_by_no.setdefault(no, {})[f"{prefix}_note"] = f"{temp_range}C x {hr}Hr"
+    except Exception:
+        ht_by_no = {}
+
+    nos = sorted(set(chem_by_no) | set(mech_by_no) | set(ht_by_no))
+    if len(nos) < 2:
+        return pd.DataFrame(columns=_measured_columns())
+
+    rows = []
+    for no in nos:
+        row = {c: np.nan for c in _measured_columns()}
+        row["material_grade"] = material_grade or np.nan
+        row["product_name"] = product_name or np.nan
+        if no in chem_by_no:
+            row.update({k: v for k, v in chem_by_no[no].items() if k in row})
+        if no in mech_by_no:
+            row.update({k: v for k, v in mech_by_no[no].items() if k in row})
+        if no in ht_by_no:
+            row.update({k: v for k, v in ht_by_no[no].items() if k in row})
+        ht_note = "; ".join([v for k, v in ht_by_no.get(no, {}).items() if k.endswith("_note")])
+        row["note"] = f"DCA material certificate parser | source={file_name} | cert_no={cert_no} | no={no}"
+        if ht_note:
+            row["note"] += f" | HT={ht_note}"
+        rows.append(row)
+
+    return pd.DataFrame(rows)[_measured_columns()]
+
 def parse_pdf_certificate(uploaded_file):
-    """PDF MTR/시험성적서에서 표 + 본문 텍스트를 같이 사용해 추출합니다."""
+    """PDF MTR/시험성적서에서 전용 양식 파서 + 표 + 본문 텍스트를 같이 사용해 추출합니다."""
     text = _extract_pdf_text(uploaded_file)
+
+    # DAECHANG DCA-153-2 Material Certificate처럼 Cast No./기계시험/열처리가
+    # 서로 다른 표 블록에 있는 양식은 전용 파서를 먼저 사용한다.
+    dca_df = _parse_dca_material_certificate(text, uploaded_file.name) if text.strip() else pd.DataFrame(columns=_measured_columns())
+    if dca_df is not None and not dca_df.empty:
+        return dca_df
+
     text_df = _text_row_from_pdf_text(text, uploaded_file.name) if text.strip() else pd.DataFrame(columns=_measured_columns())
     table_frames = _extract_pdf_tables(uploaded_file)
     if table_frames:
@@ -559,7 +712,7 @@ def _complete_import_rows(parsed_df, default_meta=None):
 
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.6.2", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.6.4", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -571,7 +724,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.6.2: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.6.4: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
 
 # [SIDEBAR - GLOBAL PARAMETERS]
 with st.sidebar:

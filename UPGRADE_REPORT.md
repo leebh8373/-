@@ -162,3 +162,31 @@
 - OCR은 스캔 품질, 해상도, 표 선명도, 기울어짐, 도장/서명 겹침에 따라 오인식될 수 있습니다.
 - DB 반영 전 추출 미리보기에서 Heat No., 성분, YS/TS/EL/RA/CVN/HB 값을 반드시 확인해야 합니다.
 - 사용 PC에 Tesseract OCR 엔진이 설치되어 있어야 합니다. Python 패키지 `pytesseract`만으로는 OCR 엔진이 포함되지 않습니다.
+
+## v6.6.4 - DAECHANG Material Certificate multi-cast parser fix
+
+### Problem
+- DCA-153-2 style Material Certificate has chemical composition, tensile/impact results, and heat-treatment records in separate table blocks.
+- Generic PDF extraction merged table cells incorrectly, resulting in:
+  - only 0~1 candidate row instead of 4 Cast No. rows,
+  - Material Spec. misread or truncated,
+  - Spec./Min. values sometimes confused with actual test values,
+  - heat-treatment groups such as `No. 4` and `1,2,3` not expanded to each cast row.
+
+### Fix
+- Added `_parse_dca_material_certificate()` dedicated parser.
+- The parser now extracts and expands:
+  - Cast No. / Heat No.: ZJ296-6A, ZJ296-6B, ZJ296-6C, ZJ296-6D
+  - Material Spec.: `ASTM A352 GR LCC with Purchase Spec.`
+  - Product name: `HAWSE PIPE`
+  - Chemical composition by each Cast No.
+  - Tensile values by specimen: YS, TS, EL, RA
+  - Impact average CVN by specimen
+  - Heat Treatment groups into four rows:
+    - No. 1,2,3: 903~910 / 900~908 / 640~650 / 608~610
+    - No. 4: 910~920 / 895~903 / 635~645 / 608~610
+- Heat-treatment hours are converted to minutes for the Sentinel calculation engine.
+
+### Validation sample
+- Tested with `Material Certificate_HAWSE PIPE.pdf`.
+- Parser returns 4 rows, one row per Cast No./Specimen.
