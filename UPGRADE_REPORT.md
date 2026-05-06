@@ -233,3 +233,10 @@
 ### 검증
 - app.py / calculations.py / predictor.py / main.py Python compile 완료.
 - 샘플 PDF `Material Certificate_HAWSE PIPE(1).pdf` 기준 parse_pdf_certificate 결과 4행 확인.
+
+## v6.6.7 Patch - DB 반영 즉시 갱신 및 중복 저장 방지
+- 미리보기 데이터 누적 DB 반영 후 화면/건수 Metric이 즉시 갱신되도록 `st.rerun()` 및 flash message 구조를 추가했습니다.
+- 같은 PDF/Excel/CSV를 반복 반영할 때 동일 레코드가 중복 누적되지 않도록 중복키 기반 병합 로직을 추가했습니다.
+- 중복 판정은 timestamp, 예측값, 잔차, note를 제외하고 Heat No./재질/제품/두께/열처리/성분/실측값 기준으로 수행합니다.
+- 수동 실측 입력 저장에도 동일한 중복 방지 로직을 적용했습니다.
+- 선택 삭제 기능은 DB 내부 index 기준으로 유지되며, 삭제 후 즉시 새로고침됩니다.

@@ -11,7 +11,7 @@ from io import BytesIO
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.6.6" # PDF image upload / DCA parser / SHT / selective delete verification Patch
+__version__ = "6.6.7" # DB commit rerun / duplicate prevention / PDF upload + selective delete verification Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -50,7 +50,82 @@ def load_measured_db():
 
 def save_measured_db(df):
     os.makedirs(DATA_DIR, exist_ok=True)
+    # 저장 직전 동일 레코드 중복을 한 번 더 제거합니다.
+    df = _deduplicate_measured_db(df) if df is not None and not df.empty else df
     df.to_csv(MEASURED_DB_PATH, index=False, encoding="utf-8-sig")
+
+def _norm_for_key(v):
+    """중복 판정용 값 정규화: 숫자는 반올림, 공백/NaN은 빈 문자열로 통일합니다."""
+    try:
+        if v is None or pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    try:
+        # 문자열 속 숫자와 실제 숫자를 같은 키로 만들기 위함입니다.
+        if isinstance(v, str):
+            txt = v.strip()
+            if txt.lower() in ["", "nan", "none", "n/a", "na", "-"]:
+                return ""
+            m = re.fullmatch(r"[-+]?\d*\.?\d+", txt.replace(",", ""))
+            if m:
+                return f"{float(txt.replace(',', '')):.4f}"
+            return re.sub(r"\s+", " ", txt).strip().lower()
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            return f"{float(v):.4f}"
+    except Exception:
+        pass
+    return re.sub(r"\s+", " ", str(v)).strip().lower()
+
+def _dedup_key_columns(df):
+    # timestamp/pred/residual/note는 실행 시점마다 달라질 수 있으므로 중복키에서 제외합니다.
+    preferred = [
+        "heat_no", "material_grade", "product_name", "section_type",
+        "thickness_mm", "coupon_thickness_mm", "test_temp_c",
+        "p0_type", "p0_temp", "p0_time_min", "p0_cooling",
+        "p1_type", "p1_temp", "p1_time_min", "p1_cooling",
+        "p2_type", "p2_temp", "p2_time_min", "p2_cooling",
+        "p3_type", "p3_temp", "p3_time_min", "p3_cooling",
+    ]
+    preferred += [f"comp_{e}" for e in ELEMENT_LIST]
+    preferred += [f"actual_{k}" for k in PROP_KEYS]
+    return [c for c in preferred if c in df.columns]
+
+def _make_record_keys(df):
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    cols = _dedup_key_columns(df)
+    if not cols:
+        return pd.Series([""] * len(df), index=df.index)
+    return df[cols].apply(lambda row: "|".join(_norm_for_key(row[c]) for c in cols), axis=1)
+
+def _deduplicate_measured_db(df):
+    if df is None or df.empty:
+        return df
+    work = df.copy()
+    keys = _make_record_keys(work)
+    work = work.loc[~keys.duplicated(keep="first")].reset_index(drop=True)
+    cols = _measured_columns()
+    for c in cols:
+        if c not in work.columns:
+            work[c] = np.nan
+    return work[cols]
+
+def append_measured_rows(current_df, new_rows_df):
+    """새 행을 누적 DB에 병합하되, 이미 저장된 동일 레코드는 다시 저장하지 않습니다."""
+    current_df = load_measured_db() if current_df is None else current_df.copy()
+    new_rows_df = pd.DataFrame(columns=_measured_columns()) if new_rows_df is None else new_rows_df.copy()
+    if new_rows_df.empty:
+        return _deduplicate_measured_db(current_df), 0, 0
+    new_rows_df = _deduplicate_measured_db(new_rows_df)
+    current_keys = set(_make_record_keys(current_df).tolist()) if not current_df.empty else set()
+    new_keys = _make_record_keys(new_rows_df)
+    mask_new = ~new_keys.isin(current_keys)
+    to_add = new_rows_df.loc[mask_new].copy()
+    skipped = int((~mask_new).sum())
+    merged = pd.concat([current_df, to_add], ignore_index=True)
+    merged = _deduplicate_measured_db(merged)
+    return merged, int(len(to_add)), skipped
 
 def apply_empirical_calibration(report, comp, thickness, enabled=True):
     if not enabled:
@@ -721,7 +796,7 @@ def _complete_import_rows(parsed_df, default_meta=None):
 
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.6.6", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.6.7", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -1179,6 +1254,8 @@ with tab_inverse:
 with tab_measured:
     st.header("📚 실측 데이터 누적 및 예측 보정 엔진")
     st.write("실제 Heat/MTR/기계시험 결과를 누적하면 예측값과 실측값의 잔차를 계산하여 이후 예측 시뮬레이션에 자동 보정값으로 반영합니다.")
+    if st.session_state.get("measured_db_flash"):
+        st.success(st.session_state.pop("measured_db_flash"))
 
     db_df = load_measured_db()
     m1, m2, m3 = st.columns(3)
@@ -1251,9 +1328,13 @@ with tab_measured:
         p2_m = {'type': a_p2_type, 'temp': a_p2_temp, 'time': a_p2_time, 'cooling': a_p2_cool}
         p3_m = {'type': a_p3_type, 'temp': a_p3_temp, 'time': a_p3_time, 'cooling': a_p3_cool}
         row = build_measured_record(heat_no, material_grade, product_name, section_type, comp_input, p0_m, p1_m, p2_m, p3_m, actual_thickness, actual_coupon_thick, actual_test_temp, actuals, note)
-        db_df = pd.concat([load_measured_db(), pd.DataFrame([row])], ignore_index=True)
-        save_measured_db(db_df)
-        st.success("실측 데이터가 저장되었고, 다음 예측부터 보정 후보 데이터로 사용됩니다.")
+        merged_db, added_count, skipped_count = append_measured_rows(load_measured_db(), pd.DataFrame([row]))
+        save_measured_db(merged_db)
+        if added_count > 0:
+            st.session_state["measured_db_flash"] = f"실측 데이터 {added_count}건이 저장되었습니다. 중복 제외 {skipped_count}건."
+        else:
+            st.session_state["measured_db_flash"] = f"이미 동일한 실측 데이터가 있어 추가 저장하지 않았습니다. 중복 제외 {skipped_count}건."
+        st.rerun()
 
     st.divider()
     st.subheader("2️⃣ Excel / PDF / CSV 자동 업로드 및 누적 데이터 관리")
@@ -1307,9 +1388,14 @@ with tab_measured:
                         st.error("보정 DB에 반영 가능한 실측 물성값이 없습니다. PDF/Excel에서 YS, TS, EL, RA, CVN, HB 중 최소 1개 이상이 추출되어야 합니다.")
                     else:
                         current = load_measured_db()
-                        merged = pd.concat([current, completed_df], ignore_index=True)
+                        merged, added_count, skipped_count = append_measured_rows(current, completed_df)
                         save_measured_db(merged)
-                        st.success(f"업로드 파일에서 추출한 {len(completed_df)}건을 누적 DB에 반영했습니다. 다음 예측부터 보정 데이터로 사용됩니다.")
+                        st.session_state["measured_db_flash"] = (
+                            f"업로드 파일에서 신규 {added_count}건을 누적 DB에 반영했습니다. "
+                            f"이미 저장된 중복 {skipped_count}건은 제외했습니다. "
+                            f"현재 누적 DB: {len(merged)}건"
+                        )
+                        st.rerun()
         except Exception as e:
             st.error(f"파일 자동 업로드/추출 오류: {e}")
 
