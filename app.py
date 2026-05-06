@@ -11,7 +11,7 @@ from io import BytesIO
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.6.3" # OCR PDF/Image Import + Manual Thickness Override Patch
+__version__ = "6.6.5" # Selective measured DB delete Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -1309,11 +1309,51 @@ with tab_measured:
 
     db_df = load_measured_db()
     if not db_df.empty:
-        st.dataframe(db_df.tail(100), use_container_width=True, hide_index=True)
-        st.download_button("⬇️ 누적 실측 DB 다운로드", db_df.to_csv(index=False, encoding="utf-8-sig"), file_name="measured_property_database.csv", mime="text/csv", use_container_width=True)
-        if st.button("🧹 누적 DB 초기화", type="secondary"):
-            save_measured_db(pd.DataFrame(columns=_measured_columns()))
-            st.warning("누적 실측 DB를 초기화했습니다. 페이지를 새로고침하면 반영됩니다.")
+        st.write("#### 누적 실측 DB 조회 / 선택 삭제")
+        st.caption("삭제할 행의 체크박스를 선택한 뒤 아래 삭제 버튼을 누르면 선택된 행만 DB에서 제거됩니다. 전체 초기화 버튼은 실수 방지를 위해 제거했습니다.")
+
+        # 원본 CSV의 행 위치를 보존해야 선택 삭제 시 정확히 해당 레코드만 제거할 수 있습니다.
+        db_view = db_df.reset_index().rename(columns={"index": "_db_index"})
+        db_view.insert(0, "삭제선택", False)
+
+        preferred_cols = [
+            "삭제선택", "_db_index", "timestamp", "heat_no", "material_grade", "product_name",
+            "thickness_mm", "coupon_thickness_mm", "test_temp_c",
+            "comp_C", "comp_Si", "comp_Mn", "actual_ys", "actual_ts", "actual_el",
+            "actual_ra", "actual_cvn", "actual_hb", "residual_ys", "residual_ts", "residual_cvn", "residual_hb", "note"
+        ]
+        ordered_cols = [c for c in preferred_cols if c in db_view.columns] + [c for c in db_view.columns if c not in preferred_cols]
+        db_view = db_view[ordered_cols]
+
+        edited_db_view = st.data_editor(
+            db_view,
+            use_container_width=True,
+            hide_index=True,
+            key="measured_db_select_delete_editor",
+            disabled=[c for c in db_view.columns if c != "삭제선택"],
+            column_config={
+                "삭제선택": st.column_config.CheckboxColumn("삭제 선택", help="삭제할 데이터만 체크하세요."),
+                "_db_index": st.column_config.NumberColumn("DB 행 번호", help="누적 DB 내부 행 번호입니다.", disabled=True),
+            },
+        )
+
+        selected_delete_idx = edited_db_view.loc[edited_db_view["삭제선택"] == True, "_db_index"].astype(int).tolist()
+        del_col1, del_col2 = st.columns([1, 2])
+        with del_col1:
+            delete_clicked = st.button(
+                f"🗑️ 선택 데이터 삭제 ({len(selected_delete_idx)}건)",
+                type="secondary",
+                use_container_width=True,
+                disabled=(len(selected_delete_idx) == 0),
+            )
+        with del_col2:
+            st.download_button("⬇️ 누적 실측 DB 다운로드", db_df.to_csv(index=False, encoding="utf-8-sig"), file_name="measured_property_database.csv", mime="text/csv", use_container_width=True)
+
+        if delete_clicked:
+            new_db = db_df.drop(index=selected_delete_idx).reset_index(drop=True)
+            save_measured_db(new_db)
+            st.success(f"선택한 {len(selected_delete_idx)}건을 누적 DB에서 삭제했습니다. 화면을 새로고침하면 반영됩니다.")
+            st.rerun()
     else:
         st.info("아직 누적된 실측 데이터가 없습니다.")
 

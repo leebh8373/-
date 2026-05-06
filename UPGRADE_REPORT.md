@@ -190,3 +190,11 @@
 ### Validation sample
 - Tested with `Material Certificate_HAWSE PIPE.pdf`.
 - Parser returns 4 rows, one row per Cast No./Specimen.
+
+
+## v6.6.5 선택 삭제 기능 추가
+- 실측 데이터 누적 DB 관리 영역에서 전체 초기화 버튼을 제거했습니다.
+- 누적 DB 테이블에 `삭제 선택` 체크박스를 추가했습니다.
+- 사용자가 선택한 행만 CSV DB에서 삭제하도록 구현했습니다.
+- 내부 DB 행 번호를 보존하여 화면 정렬/표시와 무관하게 정확한 행이 삭제되도록 했습니다.
+- 삭제 후 자동 새로고침(`st.rerun`)으로 화면에 즉시 반영되도록 했습니다.
