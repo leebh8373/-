@@ -11,7 +11,7 @@ from io import BytesIO
 # [FORCE RELOAD] 서버 캐시 방지를 위해 모듈 강제 리로드
 importlib.reload(calc)
 
-__version__ = "6.6.1" # Excel/PDF Auto Import + Manual Thickness Override Patch
+__version__ = "6.6.3" # OCR PDF/Image Import + Manual Thickness Override Patch
 
 # Plotly 라이브러리 가용성 체크 (에러 방지용 검증 로직)
 try:
@@ -218,9 +218,8 @@ def parse_excel_or_csv(uploaded_file):
     return pd.concat(parsed, ignore_index=True) if parsed else pd.DataFrame(columns=_measured_columns())
 
 
-def _extract_pdf_text(uploaded_file):
-    data = uploaded_file.read()
-    uploaded_file.seek(0)
+def _direct_extract_pdf_text(data):
+    """텍스트 선택 가능한 PDF에서 일반 텍스트를 추출합니다."""
     text = ""
     try:
         import pdfplumber
@@ -228,14 +227,76 @@ def _extract_pdf_text(uploaded_file):
             for page in pdf.pages:
                 text += "\n" + (page.extract_text() or "")
     except Exception:
+        text = ""
+    if len(re.sub(r"\s+", "", text)) < 50:
         try:
             from pypdf import PdfReader
             reader = PdfReader(BytesIO(data))
             for page in reader.pages:
                 text += "\n" + (page.extract_text() or "")
         except Exception:
-            text = ""
+            pass
     return text
+
+
+def _pdf_text_has_useful_values(text):
+    """성분/물성 라벨이 충분히 있는지 판단하여 OCR 필요 여부를 결정합니다."""
+    compact = re.sub(r"\s+", "", text or "").lower()
+    if len(compact) < 250:
+        return False
+    labels = [
+        "yield", "tensile", "elong", "impact", "charpy", "hardness", "brinell",
+        "ys", "uts", "rp0.2", "hb", "hbw", "cvn", "항복", "인장", "연신", "충격", "경도",
+    ]
+    hits = sum(1 for x in labels if x.replace(" ", "") in compact)
+    return hits >= 2
+
+
+def _ocr_pdf_text(data, max_pages=6, zoom=2.7):
+    """이미지/스캔 PDF를 페이지 이미지로 렌더링한 뒤 OCR로 텍스트를 추출합니다.
+    - PyMuPDF(fitz)로 PDF 페이지를 이미지화
+    - PIL 전처리: 회색조, 자동 대비, 확대
+    - Tesseract OCR: 영문+한글 성적서 대응
+    """
+    ocr_text = ""
+    try:
+        import fitz  # PyMuPDF
+        import pytesseract
+        from PIL import Image, ImageOps, ImageFilter
+        doc = fitz.open(stream=data, filetype="pdf")
+        page_count = min(len(doc), max_pages)
+        for page_idx in range(page_count):
+            page = doc.load_page(page_idx)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = ImageOps.grayscale(img)
+            img = ImageOps.autocontrast(img)
+            # 성적서 표의 작은 숫자 인식을 위해 살짝 선명화
+            img = img.filter(ImageFilter.SHARPEN)
+            try:
+                text = pytesseract.image_to_string(img, lang="eng+kor", config="--oem 3 --psm 6")
+            except Exception:
+                text = pytesseract.image_to_string(img, lang="eng", config="--oem 3 --psm 6")
+            if text:
+                ocr_text += f"\n[OCR_PAGE_{page_idx+1}]\n" + text
+        doc.close()
+    except Exception:
+        # OCR 라이브러리 또는 Tesseract 미설치 환경에서는 기존 PDF 텍스트 추출만 사용
+        return ""
+    return ocr_text
+
+
+def _extract_pdf_text(uploaded_file):
+    data = uploaded_file.read()
+    uploaded_file.seek(0)
+    direct_text = _direct_extract_pdf_text(data)
+    # 직접 텍스트가 부족하거나, 물성/성분 라벨이 보이지 않을 때 OCR 보조 추출 수행
+    if not _pdf_text_has_useful_values(direct_text):
+        ocr_text = _ocr_pdf_text(data)
+        if ocr_text.strip():
+            return direct_text + "\n\n[Sentinel OCR fallback text]\n" + ocr_text
+    return direct_text
+
 
 
 def _extract_pdf_tables(uploaded_file):
@@ -247,50 +308,204 @@ def _extract_pdf_tables(uploaded_file):
         with pdfplumber.open(BytesIO(data)) as pdf:
             for page_no, page in enumerate(pdf.pages, start=1):
                 for table in page.extract_tables() or []:
+                    if len(table) < 1:
+                        continue
+                    # 1) 일반적인 첫 행 헤더 테이블
                     if len(table) >= 2:
                         header = [str(x).strip() if x is not None else "" for x in table[0]]
                         df = pd.DataFrame(table[1:], columns=header)
                         std = _standardize_import_dataframe(df)
                         if not std.empty:
-                            std["note"] = std.get("note", "").fillna("").astype(str) + f" | imported_pdf_page={page_no}"
+                            std["note"] = std.get("note", "").fillna("").astype(str) + f" | imported_pdf_table_page={page_no}"
                             tables.append(std)
+                    # 2) 좌측 항목명 / 우측 값 형태의 key-value 테이블
+                    flat_rows = []
+                    for tr in table:
+                        cells = ["" if c is None else str(c).strip() for c in tr]
+                        if any(cells):
+                            flat_rows.append(cells)
+                    kv_row = {c: np.nan for c in _measured_columns()}
+                    for cells in flat_rows:
+                        joined = " ".join(cells)
+                        for target, aliases in COLUMN_SYNONYMS.items():
+                            if target not in kv_row:
+                                continue
+                            for alias in aliases + [target]:
+                                if _norm_name(alias) and _norm_name(alias) in _norm_name(joined):
+                                    # 같은 행의 마지막 숫자 또는 마지막 텍스트 셀을 값으로 사용
+                                    val = np.nan
+                                    nums = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", joined.replace(",", ""))
+                                    if target.startswith("comp_") or target.startswith("actual_") or target.endswith("_mm") or target.endswith("_temp") or target.endswith("_time_min"):
+                                        if nums:
+                                            val = nums[-1]
+                                    else:
+                                        for c in reversed(cells):
+                                            if c and _norm_name(c) != _norm_name(alias):
+                                                val = c
+                                                break
+                                    if pd.notna(val):
+                                        kv_row[target] = val
+                                    break
+                    kv_std = _standardize_import_dataframe(pd.DataFrame([kv_row]))
+                    if not kv_std.empty:
+                        kv_std["note"] = kv_std.get("note", "").fillna("").astype(str) + f" | imported_pdf_kv_page={page_no}"
+                        tables.append(kv_std)
     except Exception:
         pass
     return tables
 
 
-def parse_pdf_certificate(uploaded_file):
-    """PDF MTR/시험성적서에서 표 또는 key-value 텍스트를 추출합니다."""
-    table_frames = _extract_pdf_tables(uploaded_file)
-    if table_frames:
-        return pd.concat(table_frames, ignore_index=True)
-    text = _extract_pdf_text(uploaded_file)
-    if not text.strip():
-        return pd.DataFrame(columns=_measured_columns())
+def _first_number_after_label(text, aliases, min_value=None, max_value=None, window=100):
+    """PDF 텍스트에서 라벨 뒤쪽 가까운 숫자를 추출합니다."""
+    for alias in aliases:
+        pat = re.compile(re.escape(alias), flags=re.IGNORECASE)
+        for m in pat.finditer(text):
+            segment = text[m.end():m.end()+window].replace(",", "")
+            nums = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", segment)
+            for n in nums:
+                try:
+                    v = float(n)
+                    if min_value is not None and v < min_value:
+                        continue
+                    if max_value is not None and v > max_value:
+                        continue
+                    return v
+                except Exception:
+                    pass
+    return np.nan
 
+
+def _text_row_from_pdf_text(text, file_name=""):
+    """표 인식이 불완전한 PDF에서도 본문 텍스트에서 성분/기계적 물성을 보조 추출합니다."""
     row = {c: np.nan for c in _measured_columns()}
-    row["note"] = f"PDF 자동 추출: {uploaded_file.name}"
-    patterns = {
-        "heat_no": r"(?:Heat\s*(?:No\.?|Number)|용해번호|히트번호)\s*[:：]?\s*([A-Za-z0-9\-_/]+)",
-        "material_grade": r"(?:Material|Grade|Spec|재질|규격)\s*[:：]?\s*([A-Za-z0-9\-_/ .]+)",
-        "thickness_mm": r"(?:Thickness|THK|두께)\s*[:：]?\s*([0-9.]+)\s*mm?",
-        "actual_ys": r"(?:YS|Yield\s*Strength|항복강도|Rp0\.2)\s*[:：]?\s*([0-9.]+)",
-        "actual_ts": r"(?:TS|UTS|Tensile\s*Strength|인장강도|Rm)\s*[:：]?\s*([0-9.]+)",
-        "actual_el": r"(?:EL|Elongation|연신율|A5)\s*[:：]?\s*([0-9.]+)",
-        "actual_ra": r"(?:RA|Reduction\s*of\s*Area|단면수축률|Z)\s*[:：]?\s*([0-9.]+)",
-        "actual_cvn": r"(?:CVN|Charpy|Impact|충격치|흡수에너지)\s*[:：]?\s*([0-9.]+)",
-        "actual_hb": r"(?:HBW?|Brinell|Hardness|경도)\s*[:：]?\s*([0-9.]+)",
+    row["note"] = f"PDF text fallback: {file_name}"
+    clean = re.sub(r"[\t\r]+", " ", text or "")
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in clean.split("\n") if ln.strip()]
+    joined = "\n".join(lines)
+
+    # 기본 정보
+    basic_patterns = {
+        "heat_no": [r"(?:Heat\s*(?:No\.?|Number)|Heat\s*No\.|Cast\s*No\.?|Lot\s*No\.?|Charge\s*No\.?|용해번호|히트번호)\s*[:：#-]?\s*([A-Za-z0-9\-_/]+)"],
+        "material_grade": [r"(?:Material\s*(?:Grade|Spec(?:ification)?)?|Grade|Spec|Steel\s*Grade|재질|규격|강종)\s*[:：#-]?\s*([A-Za-z0-9\-_/ .]+)"],
+        "product_name": [r"(?:Product|Item|Description|Part\s*Name|품명|제품명)\s*[:：#-]?\s*([A-Za-z0-9\-_/ .]+)"],
     }
-    for key, pat in patterns.items():
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            row[key] = m.group(1).strip()
+    for key, pats in basic_patterns.items():
+        for pat in pats:
+            m = re.search(pat, joined, flags=re.IGNORECASE)
+            if m:
+                row[key] = m.group(1).strip()
+                break
+
+    # 기계적 물성: 라벨 뒤 숫자 방식
+    mech_aliases = {
+        "actual_ys": ["Yield Strength", "Yield", "Y.S", "YS", "Rp0.2", "Rp 0.2", "0.2% Proof", "Proof Stress", "항복강도"],
+        "actual_ts": ["Tensile Strength", "Ultimate Tensile", "U.T.S", "UTS", "T.S", "TS", "Rm", "인장강도"],
+        "actual_el": ["Elongation", "Elong.", "EL", "A5", "A ", "연신율", "연신"],
+        "actual_ra": ["Reduction of Area", "R.A", "RA", "Z ", "단면수축률", "단면수축"],
+        "actual_cvn": ["Charpy", "Impact", "KV2", "CVN", "Absorbed Energy", "흡수에너지", "충격치"],
+        "actual_hb": ["Hardness", "Brinell", "HBW", "HB", "BHN", "경도", "브리넬"],
+    }
+    ranges = {
+        "actual_ys": (100, 2000), "actual_ts": (100, 2500), "actual_el": (1, 100),
+        "actual_ra": (1, 100), "actual_cvn": (1, 500), "actual_hb": (50, 700),
+    }
+    for key, aliases in mech_aliases.items():
+        lo, hi = ranges[key]
+        v = _first_number_after_label(joined, aliases, lo, hi, window=120)
+        if pd.notna(v):
+            row[key] = v
+
+    # 성분: 원소 라벨 뒤 숫자 방식 + 성분 표 헤더/값 라인 방식
     for e in ELEMENT_LIST:
-        m = re.search(rf"\b{re.escape(e)}\b\s*[:：]?\s*([0-9]+\.?[0-9]*)", text, flags=re.IGNORECASE)
+        # C는 텍스트 일반 문자와 혼동될 수 있으므로 단어 경계를 엄격히 사용
+        m = re.search(rf"(?<![A-Za-z]){re.escape(e)}(?![A-Za-z])\s*(?:%|wt%|=|:|：)?\s*([0-9]+\.\d+|0?\.\d+|[0-9]+)", joined, flags=re.IGNORECASE)
         if m:
-            row[f"comp_{e}"] = m.group(1)
+            val = _safe_float(m.group(1), np.nan)
+            if pd.notna(val) and 0 <= val <= 10:
+                row[f"comp_{e}"] = val
+
+    # 성분 테이블: "C Si Mn P S ..." 다음 행 "0.12 0.35 ..."
+    element_set = set(ELEMENT_LIST)
+    for i, line in enumerate(lines):
+        tokens = re.findall(r"\b[A-Z][a-z]?\b", line)
+        elems = [t for t in tokens if t in element_set]
+        if len(elems) >= 3:
+            for j in range(i+1, min(i+4, len(lines))):
+                nums = [float(x) for x in re.findall(r"(?<![A-Za-z])(?:\d+\.\d+|0?\.\d+|\d+)(?![A-Za-z])", lines[j].replace(",", ""))]
+                if len(nums) >= min(3, len(elems)):
+                    for e, v in zip(elems, nums):
+                        if 0 <= v <= 10:
+                            row[f"comp_{e}"] = v
+                    break
+
+    # 기계시험 표: 헤더 라인 다음 숫자 라인 방식
+    label_map = [
+        ("actual_ys", ["YS", "Yield", "Rp0.2", "Proof"]),
+        ("actual_ts", ["TS", "UTS", "Tensile", "Rm"]),
+        ("actual_el", ["EL", "Elong", "A5"]),
+        ("actual_ra", ["RA", "Reduction", "Z"]),
+        ("actual_cvn", ["CVN", "Impact", "Charpy", "KV"]),
+        ("actual_hb", ["HB", "HBW", "Hardness", "Brinell", "BHN"]),
+    ]
+    for i, line in enumerate(lines):
+        found = []
+        for key, aliases in label_map:
+            for a in aliases:
+                pos = line.lower().find(a.lower())
+                if pos >= 0:
+                    found.append((pos, key))
+                    break
+        found = sorted(dict((k, v) for k, v in found).items()) if False else sorted(found)
+        if len(found) >= 2:
+            ordered_keys = [k for _, k in found]
+            for j in range(i+1, min(i+5, len(lines))):
+                nums = [_safe_float(x) for x in re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", lines[j].replace(",", ""))]
+                nums = [x for x in nums if pd.notna(x)]
+                if len(nums) >= min(2, len(ordered_keys)):
+                    for key, v in zip(ordered_keys, nums):
+                        lo, hi = ranges.get(key, (None, None))
+                        if (lo is None or v >= lo) and (hi is None or v <= hi):
+                            row[key] = v
+                    break
+
     return _standardize_import_dataframe(pd.DataFrame([row]))
 
+
+def _merge_standard_rows(primary, fallback):
+    """PDF 표 추출 결과에 텍스트 fallback 결과를 병합합니다. 빈 칸은 fallback 값으로 채웁니다."""
+    if primary is None or primary.empty:
+        return fallback if fallback is not None else pd.DataFrame(columns=_measured_columns())
+    if fallback is None or fallback.empty:
+        return primary
+    fb = fallback.iloc[0]
+    out = primary.copy()
+    for col in out.columns:
+        if col in fallback.columns:
+            out[col] = out[col].where(out[col].notna(), fb.get(col))
+            # 빈 문자열도 fallback으로 보완
+            out[col] = out[col].replace("", np.nan).where(out[col].replace("", np.nan).notna(), fb.get(col))
+    return out
+
+
+def parse_pdf_certificate(uploaded_file):
+    """PDF MTR/시험성적서에서 표 + 본문 텍스트를 같이 사용해 추출합니다."""
+    text = _extract_pdf_text(uploaded_file)
+    text_df = _text_row_from_pdf_text(text, uploaded_file.name) if text.strip() else pd.DataFrame(columns=_measured_columns())
+    table_frames = _extract_pdf_tables(uploaded_file)
+    if table_frames:
+        table_df = pd.concat(table_frames, ignore_index=True)
+        merged = _merge_standard_rows(table_df, text_df)
+    else:
+        merged = text_df
+    # 중복/완전 공백 제거
+    if merged is None or merged.empty:
+        return pd.DataFrame(columns=_measured_columns())
+    useful_cols = ["heat_no"] + [f"comp_{e}" for e in ["C", "Si", "Mn", "Ni", "Cr", "Mo"]] + [f"actual_{k}" for k in PROP_KEYS]
+    mask = pd.Series(False, index=merged.index)
+    for c in useful_cols:
+        if c in merged.columns:
+            mask = mask | merged[c].notna()
+    return merged[mask].copy()
 
 def _complete_import_rows(parsed_df, default_meta=None):
     """추출된 표준 컬럼을 예측 잔차가 포함된 누적 DB 레코드로 변환합니다."""
@@ -344,7 +559,7 @@ def _complete_import_rows(parsed_df, default_meta=None):
 
 
 # [PAGE CONFIG]
-st.set_page_config(page_title="Sentinel-Alpha v6.6.1", layout="wide")
+st.set_page_config(page_title="Sentinel-Alpha v6.6.2", layout="wide")
 
 # [CSS CUSTOM STYLE]
 st.markdown("""
@@ -356,7 +571,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.6.0: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🛡️ Sentinel-Alpha v6.6.2: 전문가용 전공정 시뮬레이터</p>', unsafe_allow_html=True)
 
 # [SIDEBAR - GLOBAL PARAMETERS]
 with st.sidebar:
@@ -880,7 +1095,7 @@ with tab_measured:
 
     st.divider()
     st.subheader("2️⃣ Excel / PDF / CSV 자동 업로드 및 누적 데이터 관리")
-    st.caption("MTR, 기계시험 성적서, Heat 성분표를 Excel 또는 PDF로 업로드하면 Heat No., 성분, 열처리, 실측 물성을 자동 추출합니다. 본품 두께와 Coupon 두께는 파일에서 읽지 않고 아래 수동 입력값을 강제 적용합니다.")
+    st.caption("MTR, 기계시험 성적서, Heat 성분표를 Excel 또는 PDF로 업로드하면 Heat No., 성분, 열처리, 실측 물성을 자동 추출합니다. 이미지/스캔 PDF는 OCR로 보조 인식합니다. 본품 두께와 Coupon 두께는 파일에서 읽지 않고 아래 수동 입력값을 강제 적용합니다.")
 
     st.info("📌 업로드 파일의 두께 표기는 양식별 의미가 다를 수 있으므로, 보정 DB에는 아래에 입력한 본품 두께와 Coupon 두께가 우선 적용됩니다.")
     th_col1, th_col2, th_col3 = st.columns(3)
@@ -926,10 +1141,13 @@ with tab_measured:
                 st.dataframe(completed_df[[c for c in preview_cols if c in completed_df.columns]], use_container_width=True, hide_index=True)
 
                 if st.button("✅ 미리보기 데이터 누적 DB 반영", use_container_width=True):
-                    current = load_measured_db()
-                    merged = pd.concat([current, completed_df], ignore_index=True)
-                    save_measured_db(merged)
-                    st.success(f"업로드 파일에서 추출한 {len(completed_df)}건을 누적 DB에 반영했습니다. 다음 예측부터 보정 데이터로 사용됩니다.")
+                    if completed_df.empty:
+                        st.error("보정 DB에 반영 가능한 실측 물성값이 없습니다. PDF/Excel에서 YS, TS, EL, RA, CVN, HB 중 최소 1개 이상이 추출되어야 합니다.")
+                    else:
+                        current = load_measured_db()
+                        merged = pd.concat([current, completed_df], ignore_index=True)
+                        save_measured_db(merged)
+                        st.success(f"업로드 파일에서 추출한 {len(completed_df)}건을 누적 DB에 반영했습니다. 다음 예측부터 보정 데이터로 사용됩니다.")
         except Exception as e:
             st.error(f"파일 자동 업로드/추출 오류: {e}")
 
@@ -951,5 +1169,5 @@ with tab_measured:
     st.write("- 수동 입력 또는 Excel/PDF/CSV 업로드 시 현재 엔진 예측값과 실측값의 차이, 즉 `actual - predicted` 잔차를 함께 저장합니다.")
     st.write("- 예측 시뮬레이션에서는 두께, Ceq, Pcm이 유사한 누적 데이터에 더 높은 가중치를 부여하여 YS/TS/EL/RA/CVN/HB를 보정합니다.")
     st.write("- 업로드 자동 반영 시 본품 두께와 Coupon 두께는 파일 추출값이 아니라 사용자가 입력한 값으로 강제 적용할 수 있습니다.")
-    st.write("- PDF 자동 추출은 성적서 양식에 따라 인식률 차이가 있으므로, 반드시 미리보기 값 확인 후 DB에 반영하는 구조로 설계했습니다.")
+    st.write("- PDF 자동 추출은 성적서 양식과 이미지 품질에 따라 인식률 차이가 있으므로, OCR 결과 포함 미리보기 값을 반드시 확인한 뒤 DB에 반영하는 구조로 설계했습니다.")
     st.warning("주의: 데이터가 적을 때는 보정 신뢰도가 낮습니다. 최소 3건 이상부터 보정이 적용되며, 동일 재질·동일 열처리·유사 두께 데이터가 많을수록 정확도가 높아집니다.")

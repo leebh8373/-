@@ -5,3 +5,6 @@ plotly
 openpyxl
 pdfplumber
 pypdf
+PyMuPDF
+pytesseract
+Pillow
