@@ -198,3 +198,38 @@
 - 사용자가 선택한 행만 CSV DB에서 삭제하도록 구현했습니다.
 - 내부 DB 행 번호를 보존하여 화면 정렬/표시와 무관하게 정확한 행이 삭제되도록 했습니다.
 - 삭제 후 자동 새로고침(`st.rerun`)으로 화면에 즉시 반영되도록 했습니다.
+
+## v6.6.6 PDF 이미지 업로드 / 선택 삭제 / Solution Heat Treatment 패치
+
+### 목적
+- v6.4 계열에서 가능했던 이미지/PDF 업로드 인식 흐름을 유지하면서, v6.6.5의 누적 DB 선택 삭제 기능과 대창 Material Certificate 전용 파서를 통합 안정화했습니다.
+- 실측 데이터 입력 탭뿐 아니라 예측 시뮬레이션 공정 선택에도 1차 공정 `Solution Heat Treatment`를 추가했습니다.
+
+### 주요 수정
+1. PDF 업로드 UI/파서 재점검
+   - 파일 업로더 허용 확장자: xlsx/xls/csv/pdf 유지 확인.
+   - PDF 텍스트 추출 + OCR 보조 인식 + 대창 DCA Material Certificate 전용 파서 우선 적용 구조를 유지.
+   - 대창 HAWSE PIPE Material Certificate 샘플 기준 Cast No. 4개가 각각 독립 보정 후보 행으로 생성되는지 검증.
+
+2. 대창 Material Certificate 샘플 검증 결과
+   - ZJ296-6A / ZJ296-6B / ZJ296-6C / ZJ296-6D 총 4행 정상 추출.
+   - Material Spec.: ASTM A352 GR LCC with Purchase Spec. 정상 추출.
+   - Product name: HAWSE PIPE 정상 추출.
+   - Heat Treatment No. 1,2,3 그룹과 No. 4 그룹을 각 Cast No.에 자동 배정.
+   - YS/TS/EL/RA/CVN AVG. 정상 추출.
+
+3. 누적 DB 선택 삭제 재확인
+   - 전체 초기화 버튼은 app.py에서 제거 상태 유지.
+   - 누적 DB 테이블 앞에 삭제 선택 체크박스 표시.
+   - 선택한 행의 내부 DB index 기준으로만 삭제.
+   - 삭제 후 st.rerun()으로 즉시 화면 반영.
+
+4. Solution Heat Treatment 추가
+   - 정밀 물성 예측 시뮬레이션 탭의 1차 공정에 추가.
+   - 실측 데이터 수동 입력 탭의 1차 공정에 추가.
+   - PDF/Excel/CSV 자동 업로드 컬럼/별칭에서 solution heat treatment, solution treatment, SHT, 고용화, 용체화 인식 추가.
+   - calculations.py에서 Solution Heat Treatment를 Quenching 계열과 유사한 1차 오스테나이트화/용체화 공정으로 반영.
+
+### 검증
+- app.py / calculations.py / predictor.py / main.py Python compile 완료.
+- 샘플 PDF `Material Certificate_HAWSE PIPE(1).pdf` 기준 parse_pdf_certificate 결과 4행 확인.

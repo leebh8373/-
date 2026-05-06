@@ -110,6 +110,8 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
     ac3 = _ac3_estimate(c)
     if mode == "Annealing":
         solution = 0.82
+    elif mode == "Solution Heat Treatment":
+        solution = 1.02
     elif temp < ac3 + 25:
         solution = max(0.78, 0.92 + (temp - (ac3 + 25)) * 0.002)
     else:
@@ -122,6 +124,8 @@ def calculate_1st_stage_physics(comp, p1, thickness, **kwargs):
                     260*c['Nb'] + 150*c['Ti'] + 9000*c['B'])
     if mode == "Normalizing":
         mode_factor = 0.86
+    elif mode == "Solution Heat Treatment":
+        mode_factor = 1.02
     elif mode == "Annealing":
         mode_factor = 0.70
     else:
@@ -143,6 +147,12 @@ def predict_microstructure(comp, p1, thickness, **kwargs):
     transform = severity * h / (1.0 + max(1.0, _num(thickness, 150))/180.0)
     if p_type == "Annealing":
         return "Ferrite + Coarse Pearlite (F+P)", "서냉/풀림 조건으로 조대한 페라이트·펄라이트 조직이 우세합니다."
+    if p_type == "Solution Heat Treatment":
+        if transform > 1.15:
+            return "Solution Treated + Tempered Martensite/Bainite", "Solution Heat Treatment 후 급냉 조건으로 마르텐사이트/베이나이트계 조직 가능성을 반영합니다."
+        if transform > 0.55:
+            return "Solution Treated + Bainite/Pearlite", "Solution Heat Treatment 후 단면 질량효과로 베이나이트·펄라이트 혼합 가능성을 반영합니다."
+        return "Solution Treated Ferrite + Pearlite", "Solution Heat Treatment 조건이나 냉각 속도 부족으로 페라이트·펄라이트 지배 가능성을 반영합니다."
     if p_type == "Normalizing":
         if transform > 0.75:
             return "Ferrite + Pearlite + Bainite (F+P+B)", "정규화 조직에 합금 경화능 영향으로 일부 베이나이트가 포함될 가능성이 있습니다."
@@ -178,7 +188,7 @@ def get_final_expert_simulation(ts_1st, p2, p3, test_temp, comp, p1=None, thickn
     cool_penalty = 0.96 if "노냉" in str(p2.get('cooling', p2.get('cool',''))) or "노냉" in str(p3.get('cooling', p3.get('cool',''))) else 1.0
     f_ts = max(300.0, _num(ts_1st, 500) * (1.0 - min(0.55, loss)) * cool_penalty)
 
-    yr_base = 0.72 if not p1 or p1.get('type', p1.get('mode','')) != 'Quenching' else 0.82
+    yr_base = 0.82 if p1 and p1.get('type', p1.get('mode','')) in ('Quenching', 'Solution Heat Treatment') else 0.72
     yr = min(0.94, yr_base + 0.035 * (temper_loss(p2) > 0.05) + 0.02*c['V']*10)
     f_ys = f_ts * yr
 
